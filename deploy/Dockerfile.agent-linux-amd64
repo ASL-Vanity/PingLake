@@ -1,0 +1,12 @@
+FROM rust:1.97-slim-bookworm@sha256:8d7cf6bc81180ec559dca5dd149d9ce78c9cfa270da33ab5690c6b9a5190d953 AS builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends musl-tools \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add x86_64-unknown-linux-musl
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ ./crates/
+RUN cargo build --release --locked -p pinglake-agent --target x86_64-unknown-linux-musl
+
+FROM scratch AS export
+COPY --from=builder /src/target/x86_64-unknown-linux-musl/release/pinglake-agent /pinglake-agent-linux-amd64

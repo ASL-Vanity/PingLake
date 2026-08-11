@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+data
+release
+target
+**/target
+web/node_modules
+web/dist
+**/.tmp
+**/node_modules
+*.db
+*.db-shm
+*.db-wal
+*.log

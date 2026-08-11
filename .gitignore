@@ -1,0 +1,14 @@
+/target/
+/release/
+/web/node_modules/
+/web/dist/
+**/.tmp/
+**/target/
+/data/
+/.env
+*.db
+*.db-shm
+*.db-wal
+*.log
+.DS_Store
+Thumbs.db

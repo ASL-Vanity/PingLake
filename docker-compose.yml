@@ -1,0 +1,51 @@
+name: pinglake
+
+services:
+  hub:
+    build:
+      context: .
+    image: pinglake-hub:${PINGLAKE_IMAGE_TAG:-local}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    init: true
+    environment:
+      PINGLAKE_ADMIN_PASSWORD: ${PINGLAKE_ADMIN_PASSWORD:?set PINGLAKE_ADMIN_PASSWORD in .env}
+      PINGLAKE_ALLOW_WEAK_ADMIN_PASSWORD: ${PINGLAKE_ALLOW_WEAK_ADMIN_PASSWORD:-false}
+      PINGLAKE_ENROLLMENT_TOKEN: ${PINGLAKE_ENROLLMENT_TOKEN:?set PINGLAKE_ENROLLMENT_TOKEN in .env}
+      PINGLAKE_BIND: 0.0.0.0:8090
+      PINGLAKE_DATABASE: /data/pinglake.db
+      PINGLAKE_COOKIE_SECURE: ${PINGLAKE_COOKIE_SECURE:-true}
+      PINGLAKE_SMTP_HOST: ${PINGLAKE_SMTP_HOST:-}
+      PINGLAKE_SMTP_PORT: ${PINGLAKE_SMTP_PORT:-}
+      PINGLAKE_SMTP_FROM: ${PINGLAKE_SMTP_FROM:-}
+      PINGLAKE_SMTP_USERNAME: ${PINGLAKE_SMTP_USERNAME:-}
+      PINGLAKE_SMTP_PASSWORD: ${PINGLAKE_SMTP_PASSWORD:-}
+      RUST_LOG: ${RUST_LOG:-pinglake_hub=info,tower_http=info}
+    ports:
+      - "${PINGLAKE_PUBLISH_ADDR:-127.0.0.1}:${PINGLAKE_PUBLISH_PORT:-8090}:8090"
+    volumes:
+      - pinglake-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: ${PINGLAKE_CPU_LIMIT:-1.0}
+    mem_limit: ${PINGLAKE_MEMORY_LIMIT:-512m}
+    pids_limit: ${PINGLAKE_PIDS_LIMIT:-128}
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8090/api/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  pinglake-data:
