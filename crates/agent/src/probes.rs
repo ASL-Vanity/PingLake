@@ -277,16 +277,28 @@ pub async fn run_probe(target: ProbeTarget, revision: u64, policy: ProbePolicy) 
                 });
                 if !observation.policy_allowed {
                     result.status = ProbeStatus::PolicyDenied;
+                    result.healthy = None;
                     result.error = Some("DNS answer denied by local probe policy".into());
                 } else if observation.expected_match == Some(false) {
                     result.status = ProbeStatus::Failure;
+                    result.healthy = Some(false);
                     result.error = Some("DNS answer did not match expected value".into());
                 }
             }
         }
         Ok(Err((status, error, http_status))) => {
             result.status = status;
-            result.healthy = Some(false);
+            result.healthy = match result.status {
+                ProbeStatus::Failure => Some(false),
+                ProbeStatus::Timeout
+                | ProbeStatus::PermissionDenied
+                | ProbeStatus::Unsupported
+                | ProbeStatus::PolicyDenied
+                | ProbeStatus::WarmingUp
+                | ProbeStatus::Unavailable
+                | ProbeStatus::Stale => None,
+                ProbeStatus::Success => None,
+            };
             result.error = Some(error);
             result.http_status = http_status;
         }

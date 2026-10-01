@@ -373,7 +373,10 @@ async fn metrics(
     headers: HeaderMap,
     Json(report): Json<MetricReport>,
 ) -> Result<StatusCode, AppError> {
-    validate_metric_report(&report)?;
+    if let Err(error) = validate_metric_report(&report) {
+        tracing::warn!(error = %error, "metric report validation rejected an agent report");
+        return Err(error);
+    }
     let node_id = headers
         .get("x-agent-id")
         .and_then(|value| value.to_str().ok())
@@ -395,6 +398,7 @@ async fn metrics(
             .database
             .validate_monitoring_identity(node_id, data)?
     {
+        tracing::warn!(node_id = %node_id, "metric report monitoring identity rejected");
         return Err(AppError::bad_request(
             "service or probe result does not match this node's monitoring configuration",
         ));
