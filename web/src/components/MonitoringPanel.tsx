@@ -11,7 +11,7 @@ import { useHistoryRange } from "./HistoryRange";
 import { useHistoryQuery } from "../hooks/useHistoryQuery";
 
 const statusNames: Record<MetricStatus | ProbeStatus, string> = {
-  ok: "正常", warming_up: "初次采样", unsupported: "不支持", permission_denied: "权限不足", unavailable: "采集失败", stale: "已过期",
+  ok: "正常", warming_up: "初次采样", unsupported: "不支持", permission_denied: "权限不足", unavailable: "采集失败", stale: "已过期", unknown: "未知",
   success: "成功", failure: "失败", timeout: "超时", policy_denied: "策略禁止",
 };
 const capabilityNames: Record<string, string> = { cpu: "CPU", cpu_cores: "每核心 CPU", cpu_times: "CPU 状态", memory: "内存", disk_io: "磁盘 IO", inodes: "inode", network: "网卡", network_health: "网卡健康", tcp: "TCP", services: "服务", probes: "主动探测", agent: "Agent" };
@@ -128,14 +128,15 @@ function Network({ node, data, onUnauthorized }: { node: NodeSnapshot; data: Mon
 
 function Quality({ node, data, config, browserLatency, onUnauthorized }: { node: NodeSnapshot; data: MonitoringData; config: NodeMonitoringConfig | null; browserLatency?: BrowserLatency; onUnauthorized: () => void }) {
   const agent = data.agent;
+  const [capabilityFilter, setCapabilityFilter] = useState<MetricStatus | "all">("all");
   const age = node.last_seen_at ? Math.max(0, Date.now() - Date.parse(node.last_seen_at)) : null;
   const metricAge = age != null && Number.isFinite(agent.sample_age_ms) ? age + Math.max(0, agent.sample_age_ms) : null;
   return <>
     <Readings items={[["最近采集", formatDateTime(node.latest?.collected_at)], ["Hub 最近接收", formatDateTime(node.last_seen_at)], ["上报年龄", age == null ? "--" : `${Math.round(age / 1000)} 秒`], ["指标年龄", metricAge == null ? "--" : `${Math.round(metricAge / 1000)} 秒`], ["上报间隔", `${data.report_interval_secs} 秒`], ["采集耗时", formatLatency(agent.collection_duration_ms)], ["上次发送耗时", formatLatency(agent.send_duration_ms)], ["上报成功率", formatPercent(agent.success_rate_percent, 2)], ["尝试 / 成功 / 失败", `${agent.upload_attempts} / ${agent.upload_successes} / ${agent.upload_failures}`], ["连续失败", agent.consecutive_failures], ["重试次数", agent.retries], ["缓冲报告", agent.queue_length], ["丢弃报告", agent.dropped_reports], ["发送时样本年龄", formatLatency(agent.sample_age_ms)], ["最近成功", formatDateTime(agent.last_success_at)], ["Agent → Hub", formatLatency(node.latest?.hub_latency_ms)], ["访问者 → 此主机", browserLatencyLabel(browserLatency)], ["样本序号", data.sample_sequence], ["配置版本 / 已应用", `${config?.revision ?? "--"} / ${agent.applied_config_revision ?? "--"}`]]} />
     {agent.last_error && <p className="form-error">上次上报错误：{agent.last_error}</p>}
     {agent.config_error && <p className="form-error">配置错误：{agent.config_error}</p>}
-    <h3>采集能力</h3>
-    <Table headings={["指标", "状态", "来源", "错误"]}>{Object.entries(data.capabilities).map(([name, capability]) => <tr key={name}><th scope="row">{capabilityNames[name] ?? name}</th><td><Badge status={capability.status} /></td><td>{capability.source || "--"}</td><td>{capability.error || "--"}</td></tr>)}</Table>
+    <div className="monitoring-section-toolbar"><h3>采集能力</h3><label>状态<select aria-label="采集能力状态筛选" value={capabilityFilter} onChange={(event) => setCapabilityFilter(event.target.value as MetricStatus | "all")}><option value="all">全部状态</option><option value="ok">正常</option><option value="warming_up">初次采样</option><option value="unsupported">不支持</option><option value="permission_denied">权限不足</option><option value="unavailable">采集失败</option><option value="stale">已过期</option><option value="unknown">未知</option></select></label></div>
+    <Table headings={["指标", "状态", "来源", "错误"]}>{Object.entries(data.capabilities ?? {}).filter(([, capability]) => capabilityFilter === "all" || capability.status === capabilityFilter).map(([name, capability]) => <tr key={name}><th scope="row">{capabilityNames[name] ?? name}</th><td><Badge status={capability.status ?? "unknown"} /></td><td>{capability.source || "--"}</td><td>{capability.error || "--"}</td></tr>)}</Table>
     <MonitoringHistory nodeId={node.id} section="agent" devices={[]} onUnauthorized={onUnauthorized} />
   </>;
 }

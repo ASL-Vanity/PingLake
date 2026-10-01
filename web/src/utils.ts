@@ -1,4 +1,5 @@
 import type { DashboardSummary, HistoryPoint, NodeSnapshot } from "./types";
+import type { AgentHealth } from "./monitoringTypes";
 
 export function clampPercent(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -84,6 +85,28 @@ export function nodeMemoryPercent(node: NodeSnapshot): number {
 
 export function nodeDiskPercent(node: NodeSnapshot): number {
   return node.latest ? ratioPercent(node.latest.disk_used_bytes, node.latest.disk_total_bytes) : 0;
+}
+
+export type FreshnessState = "fresh" | "aging" | "stale" | "unknown";
+
+/** Combines Hub receive age with the agent-reported sample age. */
+export function nodeFreshness(node: NodeSnapshot, now = Date.now()): { state: FreshnessState; label: string; ageMs: number | null } {
+  if (!node.online) return { state: "stale", label: "离线 · 最后数据", ageMs: null };
+  const received = Date.parse(node.last_seen_at ?? "");
+  if (!Number.isFinite(received)) return { state: "unknown", label: "未知", ageMs: null };
+  const sampleAge = node.latest?.monitoring?.agent?.sample_age_ms;
+  const ageMs = Math.max(0, now - received) + (Number.isFinite(sampleAge) ? Math.max(0, sampleAge as number) : 0);
+  const interval = Math.max(5_000, (node.latest?.monitoring?.report_interval_secs ?? 5) * 1_000);
+  if (ageMs > Math.max(interval * 3, 45_000)) return { state: "stale", label: `${Math.round(ageMs / 1_000)} 秒前`, ageMs };
+  if (ageMs > interval * 1.5) return { state: "aging", label: `${Math.round(ageMs / 1_000)} 秒前`, ageMs };
+  return { state: "fresh", label: ageMs < 10_000 ? "刚刚" : `${Math.round(ageMs / 1_000)} 秒前`, ageMs };
+}
+
+export function agentQuality(agent: AgentHealth | undefined): { state: "good" | "warning" | "bad" | "unknown"; label: string } {
+  if (!agent) return { state: "unknown", label: "未知" };
+  if (agent.config_error || agent.consecutive_failures > 0 || agent.upload_failures > 0) return { state: "bad", label: "异常" };
+  if ((agent.success_rate_percent != null && agent.success_rate_percent < 99) || agent.queue_length > 0 || agent.dropped_reports > 0) return { state: "warning", label: "需关注" };
+  return { state: "good", label: "良好" };
 }
 
 export function historyMemoryPercent(point: HistoryPoint): number {

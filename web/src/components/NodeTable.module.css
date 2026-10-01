@@ -52,6 +52,11 @@
 .visitorLabel { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; color: var(--muted, #71808d); font-size: 12px; }
 .visitorValue { min-width: 0; text-align: right; color: var(--text, #20262d); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .visitorValue.unavailable { color: var(--muted, #71808d); font-size: 12px; font-weight: 400; }
+.dataQuality { display: grid; gap: 4px; padding: 9px 16px; border-top: 1px solid var(--border, #e4e9ee); color: var(--muted, #71808d); font-size: 11px; }
+.freshness-fresh, .quality-good { color: var(--green, #009a78); }
+.freshness-aging, .quality-warning { color: var(--amber, #ca8b28); }
+.freshness-stale, .quality-bad { color: var(--red, #d65e65); }
+.freshness-unknown, .quality-unknown { color: var(--muted, #71808d); }
 .footer { display: grid; gap: 10px; padding: 10px 16px 12px; border-top: 1px solid var(--border, #e4e9ee); }
 .assignment { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted, #71808d); font-size: 12px; }
 .assignment select { min-width: 0; max-width: 66%; height: 28px; padding: 0 26px 0 7px; background: transparent; border: 1px solid var(--border, #e4e9ee); border-radius: 4px; color: var(--text, #20262d); font-size: 12px; }
@@ -78,6 +83,7 @@
 .offline .tableStatus { color: var(--muted, #71808d); }
 .number { white-space: nowrap; font-weight: 550; }
 .tableLatency { max-width: 145px; font-size: 12px; }
+.table .freshness-fresh, .table .freshness-aging, .table .freshness-stale, .table .freshness-unknown, .table .quality-good, .table .quality-warning, .table .quality-bad, .table .quality-unknown { white-space: nowrap; font-weight: 550; }
 .table .assignment select { max-width: 145px; }
 .table .error { max-width: 170px; margin-top: 6px; font-size: 11px; }
 .empty { min-height: 230px; display: grid; align-content: center; justify-items: center; gap: 12px; border-top: 1px solid var(--border, #e4e9ee); color: var(--muted, #71808d); }

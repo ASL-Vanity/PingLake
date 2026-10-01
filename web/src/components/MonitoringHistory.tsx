@@ -71,7 +71,7 @@ export function MonitoringHistory({ nodeId, section, devices, onUnauthorized }: 
     (point) => value(point.monitoring, section, selectedMetric?.key ?? "", selectedDevice));
   return <section className="monitoring-history" aria-label="设备监测历史">
     <div className="monitoring-history-controls">
-      <strong>历史趋势</strong>
+      <strong>历史趋势</strong><span className="monitoring-history-timebasis">时间：{section === "services" || section === "probes" ? "采集完成" : "Hub 接收"}</span>
       {devices.length > 0 && <label>对象<select value={selectedDevice} onChange={(event) => setDevice(event.target.value)}>{devices.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
       <label>指标<select value={selectedMetric?.key ?? ""} onChange={(event) => setMetric(event.target.value)}>{options.map((item) => <option value={item.key} key={item.key}>{item.name}</option>)}</select></label>
       <button type="button" className="icon-button" title="刷新监测历史" aria-label="刷新监测历史" onClick={refresh}><RefreshCw size={16} className={loading ? "spin" : ""} /></button>

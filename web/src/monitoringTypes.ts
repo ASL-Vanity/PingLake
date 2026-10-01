@@ -1,4 +1,7 @@
-export type MetricStatus = "ok" | "warming_up" | "unsupported" | "permission_denied" | "unavailable" | "stale";
+// `unknown` is intentionally accepted even though current agents usually emit
+// a more specific status. Older agents and partially populated history points
+// can only tell us that a value is not known yet.
+export type MetricStatus = "ok" | "warming_up" | "unsupported" | "permission_denied" | "unavailable" | "stale" | "unknown";
 export interface Capability { status: MetricStatus; source: string; error: string | null }
 export interface CpuCore { id: string; usage_percent: number; frequency_mhz: number | null }
 export interface DiskIo {
