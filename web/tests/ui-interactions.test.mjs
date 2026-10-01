@@ -135,10 +135,10 @@ test("v1 nodes remain readable while v2 checks expose DNS, process and local-por
   const v2 = node();
   v2.latest.monitoring.schema_version = 2;
   const checkedAt = new Date().toISOString();
-  v2.latest.monitoring.dns_checks = [{ id: "dns1", name: "DNS", config_revision: 1, status: "policy_denied", hostname: "example.com", record_type: "A", answers: [], checked_at: checkedAt, latency_ms: null, error: "blocked", reason: "policy" }];
-  v2.latest.monitoring.process_checks = [{ id: "proc1", name: "worker", config_revision: 1, status: "permission_denied", process_name: "worker", count: null, expected_count: 1, checked_at: checkedAt, error: "denied", reason: null }];
-  v2.latest.monitoring.local_port_checks = [{ id: "port1", name: "HTTP", config_revision: 1, status: "unavailable", address: null, port: 8080, checked_at: checkedAt, latency_ms: null, error: "missing", reason: null }];
-  const v2Config = { ...config, dns_checks: [{ id: "dns1", name: "DNS", hostname: "example.com", record_type: "A", expected_value: null, enabled: true, interval_secs: 30, timeout_ms: 5000 }], process_checks: [{ id: "proc1", name: "worker", process_name: "worker", expected_count: 1, enabled: true, expected_state: "running", interval_secs: 30, timeout_ms: 5000 }], local_port_checks: [{ id: "port1", name: "HTTP", address: null, port: 8080, enabled: true, interval_secs: 30, timeout_ms: 5000 }] };
+  v2.latest.monitoring.probes.push({ sample_id: "dns-sample", target_id: "dns1", config_revision: 1, kind: "dns", status: "policy_denied", completed_at: checkedAt, scheduled_at: checkedAt, latency_ms: null, http_status: null, error: "blocked", healthy: null, dns: { record_type: "A", rcode: 5, answers: [] } });
+  v2.latest.monitoring.process_checks = [{ id: "proc1", name: "worker", config_revision: 1, status: "permission_denied", process_name: "worker", count: null, expected_count: 1, checked_at: checkedAt, error: "denied", reason: null, healthy: null }];
+  v2.latest.monitoring.local_port_checks = [{ id: "port1", name: "HTTP", config_revision: 1, status: "unavailable", address_scope: { scope: "any_local" }, address_family: "any", protocol: "tcp", port: 8080, checked_at: checkedAt, observed_addresses: [], latency_ms: null, error: "missing", reason: null, healthy: null }];
+  const v2Config = { ...config, probes: [...config.probes, { id: "dns1", name: "DNS", kind: "dns", target: "example.com", port: null, enabled: true, interval_secs: 30, timeout_ms: 5000, expected_status: null, response_contains: null, dns: { record_type: "A", expected_value: null } }], process_checks: [{ id: "proc1", name: "worker", process_name: "worker", expected_count: 1, enabled: true, expected_state: "running", interval_secs: 30, timeout_ms: 5000 }], local_port_checks: [{ id: "port1", name: "HTTP", address_scope: { scope: "any_local" }, address_family: "any", protocol: "tcp", port: 8080, enabled: true, interval_secs: 30, timeout_ms: 5000 }] };
   Object.assign(config, v2Config);
   await mount(React.createElement(NodeDetail, { node: v2, initialTab: "probes", onBack() {}, onDelete: async () => {}, onRename: async () => v2, onUnauthorized() {}, onConfigSaved() {} }));
   try {
@@ -150,7 +150,7 @@ test("v1 nodes remain readable while v2 checks expose DNS, process and local-por
   await mount(React.createElement(MonitoringConfig, { nodeId, config: v2Config, onSaved() {}, onUnauthorized() {} }));
   try {
     assert.ok(container.querySelector('input[aria-label="不存在"]') == null);
-    assert.match(container.textContent, /DNS 检查/);
+    assert.match(container.textContent, /DNS/);
     assert.match(container.textContent, /进程检查/);
     assert.match(container.textContent, /本机端口检查/);
     const firstText = container.querySelectorAll("input")[0];

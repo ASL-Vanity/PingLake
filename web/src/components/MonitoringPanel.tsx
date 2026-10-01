@@ -168,7 +168,7 @@ function Probes({ node, data, config, onUnauthorized }: { node: NodeSnapshot; da
   const { data: stats, loading, error, refresh } = useHistoryQuery<ProbeStatistics[]>(`probes:${nodeId}:${minutes}:${config?.revision}`, fetcher, onUnauthorized, `probes:${nodeId}:${config?.revision}`, range?.refreshKey);
   const statistics = stats ?? [];
   const probes = config?.probes ?? [];
-  const dnsChecks = config?.dns_checks ?? [];
+  const dnsChecks = probes.filter((item) => item.kind === "dns");
   const localPorts = config?.local_port_checks ?? [];
   return <>{data && <Capabilities data={data} names={["probes"]} />}{probes.length ? <Table headings={["目标", "类型", "地址", "状态", "延迟", "HTTP", "最近检查", "错误"]}>{probes.map((target) => {
     const result = [...(data?.probes ?? [])].reverse().find((item) => item.target_id === target.id && item.config_revision === config?.revision);
@@ -179,14 +179,14 @@ function Probes({ node, data, config, onUnauthorized }: { node: NodeSnapshot; da
     {error ? <p className="form-error" role="alert">{error}</p> : loading ? <p className="monitoring-empty">载入统计中</p> : statistics.length ? <Table headings={["目标", "成功 / 失败 / 未知", "预期样本", "成功率", "可用率（已观测）", "覆盖率", "P50", "P95", "P99", "可用 / 观测 / 未知时长"]}>{statistics.map((item) => <tr key={item.target_id}><th scope="row">{item.name}</th><td>{item.successful} / {item.failed} / {item.unknown}</td><td>{item.expected}</td><td>{formatPercent(item.success_rate_percent, 2)}</td><td>{formatPercent(item.observed_seconds > 0 ? item.available_seconds * 100 / item.observed_seconds : null, 2)}</td><td>{formatPercent(item.coverage_percent, 2)}</td><td><Quantile value={item.p50_ms} count={item.latency_samples} minimum={2} /></td><td><Quantile value={item.p95_ms} count={item.latency_samples} minimum={20} /></td><td><Quantile value={item.p99_ms} count={item.latency_samples} minimum={100} /></td><td>{number(item.available_seconds, "s", 0)} / {number(item.observed_seconds, "s", 0)} / {number(item.unknown_seconds, "s", 0)}</td></tr>)}</Table> : <p className="monitoring-empty">所选范围内暂无探测统计</p>}
     {probes.length > 0 && <MonitoringHistory nodeId={nodeId} section="probes" devices={probes.map((item) => ({ id: item.id, name: item.name, intervalSecs: item.interval_secs }))} onUnauthorized={onUnauthorized} />}
     {dnsChecks.length > 0 && <><h3 className="monitoring-subheading">DNS 检查</h3><Table headings={["名称", "主机名", "记录", "答案", "状态", "延迟", "最近检查", "错误"]}>{dnsChecks.map((check) => {
-      const result = data?.dns_checks?.find((item) => item.id === check.id && item.config_revision === config?.revision);
-      const stale = checkStale(node, result?.checked_at ?? result?.completed_at ?? undefined, check.interval_secs, now);
-      return <tr key={check.id}><th scope="row">{check.name}</th><td>{check.hostname}</td><td>{check.record_type}</td><td>{result?.answers?.join(", ") || "--"}</td><td>{!check.enabled ? "已暂停" : result ? <Badge status={stale ? "stale" : result.status} error={result.error ?? result.reason} /> : "等待采样"}</td><td>{result?.status === "ok" && !stale ? formatLatency(result.latency_ms) : "--"}</td><td>{formatRelativeTime(result?.checked_at ?? result?.completed_at ?? undefined)}</td><td>{result?.error ?? result?.reason ?? "--"}</td></tr>;
-    })}</Table><MonitoringHistory nodeId={nodeId} section="dns" devices={dnsChecks.map((item) => ({ id: item.id, name: item.name, intervalSecs: item.interval_secs }))} onUnauthorized={onUnauthorized} /></>}
-    {localPorts.length > 0 && <><h3 className="monitoring-subheading">本机端口</h3><Table headings={["名称", "端口", "启用", "状态", "最近检查", "错误"]}>{localPorts.map((check) => {
+      const result = [...(data?.probes ?? [])].reverse().find((item) => item.target_id === check.id && item.config_revision === config?.revision && item.kind === "dns");
+      const stale = checkStale(node, result?.completed_at, check.interval_secs, now);
+      return <tr key={check.id}><th scope="row">{check.name}</th><td>{check.target}</td><td>{check.dns?.record_type ?? "A"}</td><td>{result?.dns?.answers?.join(", ") || "--"}</td><td>{!check.enabled ? "已暂停" : result ? <Badge status={stale ? "stale" : result.status} error={result.error} /> : "等待采样"}</td><td>{result?.status === "success" && result.healthy !== false && !stale ? formatLatency(result.latency_ms) : "--"}</td><td>{formatRelativeTime(result?.completed_at)}</td><td>{result?.error ?? "--"}</td></tr>;
+    })}</Table></>}
+    {localPorts.length > 0 && <><h3 className="monitoring-subheading">本机端口</h3><Table headings={["名称", "协议 / 范围", "端口", "启用", "状态", "观察地址", "最近检查", "错误"]}>{localPorts.map((check) => {
       const result = data?.local_port_checks?.find((item) => item.id === check.id && item.config_revision === config?.revision);
       const stale = checkStale(node, result?.checked_at ?? undefined, check.interval_secs, now);
-      return <tr key={check.id}><th scope="row">{check.name}</th><td>{check.port}</td><td>{check.enabled ? "是" : "已暂停"}</td><td>{!check.enabled ? "已暂停" : result ? <Badge status={stale ? "stale" : result.status} error={result.error} /> : "等待采样"}</td><td>{formatRelativeTime(result?.checked_at ?? undefined)}</td><td>{result?.error ?? "--"}</td></tr>;
+      return <tr key={check.id}><th scope="row">{check.name}</th><td>{check.protocol?.toUpperCase() ?? "TCP"} / {check.address_scope?.scope ?? "any_local"}</td><td>{check.port}</td><td>{check.enabled ? "是" : "已暂停"}</td><td>{!check.enabled ? "已暂停" : result ? <Badge status={stale ? "stale" : result.status} error={result.error ?? result.reason} /> : "等待采样"}</td><td>{result?.observed_addresses?.join(", ") || "--"}</td><td>{formatRelativeTime(result?.checked_at ?? result?.completed_at ?? undefined)}</td><td>{result?.error ?? result?.reason ?? "--"}</td></tr>;
     })}</Table><MonitoringHistory nodeId={nodeId} section="local_ports" devices={localPorts.map((item) => ({ id: item.id, name: item.name, intervalSecs: item.interval_secs }))} onUnauthorized={onUnauthorized} /></>}
   </>;
 }

@@ -18,7 +18,6 @@ const choices: Partial<Record<MonitoringSection, Choice[]>> = {
   agent: [{ key: "collection", name: "采集耗时", unit: "ms" }, { key: "send", name: "上报耗时", unit: "ms" }, { key: "success", name: "上报成功率", unit: "%" }, { key: "age", name: "样本年龄", unit: "ms" }, { key: "failures", name: "连续失败", unit: "" }],
   services: [{ key: "healthy", name: "服务健康", unit: "0 / 1" }],
   probes: [{ key: "latency", name: "探测延迟", unit: "ms" }],
-  dns: [{ key: "latency", name: "DNS 延迟", unit: "ms" }],
   processes: [{ key: "count", name: "进程实例数", unit: "个" }],
   local_ports: [{ key: "latency", name: "端口检查延迟", unit: "ms" }],
 };
@@ -54,7 +53,6 @@ function value(data: MonitoringData, section: MonitoringSection, key: string, de
   if (section === "agent") return ({ collection: data.agent?.collection_duration_ms, send: data.agent?.send_duration_ms, success: data.agent?.success_rate_percent, age: data.agent?.sample_age_ms, failures: data.agent?.consecutive_failures })[key] ?? null;
   if (section === "services") { const service = data.services?.find((item) => item.id === device); return service?.status === "ok" && service.healthy != null ? Number(service.healthy) : null; }
   if (section === "probes") { const probe = [...(data.probes ?? [])].reverse().find((item) => item.target_id === device); return probe?.status === "success" ? probe.latency_ms : null; }
-  if (section === "dns") { const result = [...(data.dns_checks ?? [])].reverse().find((item) => item.id === device); return result?.status === "ok" ? result.latency_ms : null; }
   if (section === "processes") { const result = [...(data.process_checks ?? [])].reverse().find((item) => item.id === device); return result?.status === "ok" ? result.count : null; }
   if (section === "local_ports") { const result = [...(data.local_port_checks ?? [])].reverse().find((item) => item.id === device); return result?.status === "ok" ? result.latency_ms : null; }
   return null;
@@ -72,12 +70,12 @@ export function MonitoringHistory({ nodeId, section, devices, onUnauthorized }: 
   const history = useHistoryQuery<MonitoringHistoryPoint[]>(`detail:${nodeId}:${minutes}:${section}:${selectedDevice}`, fetcher, onUnauthorized, `detail:${nodeId}:${section}:${selectedDevice}`, range?.refreshKey);
   const { loading, error, refresh } = history;
   const points = history.data ?? [];
-  const data = buildHistorySeries(points, { events: section === "services" || section === "probes" || section === "dns" || section === "processes" || section === "local_ports", minutes,
+  const data = buildHistorySeries(points, { events: section === "services" || section === "probes" || section === "processes" || section === "local_ports", minutes,
     intervalSecs: devices.find((device) => device.id === selectedDevice)?.intervalSecs },
     (point) => value(point.monitoring, section, selectedMetric?.key ?? "", selectedDevice));
   return <section className="monitoring-history" aria-label="设备监测历史">
     <div className="monitoring-history-controls">
-      <strong>历史趋势</strong><span className="monitoring-history-timebasis">时间：{section === "services" || section === "probes" || section === "dns" || section === "processes" || section === "local_ports" ? "检查完成" : "Hub 接收"}</span>
+      <strong>历史趋势</strong><span className="monitoring-history-timebasis">时间：{section === "services" || section === "probes" || section === "processes" || section === "local_ports" ? "检查完成" : "Hub 接收"}</span>
       {devices.length > 0 && <label>对象<select value={selectedDevice} onChange={(event) => setDevice(event.target.value)}>{devices.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
       <label>指标<select value={selectedMetric?.key ?? ""} onChange={(event) => setMetric(event.target.value)}>{options.map((item) => <option value={item.key} key={item.key}>{item.name}</option>)}</select></label>
       <button type="button" className="icon-button" title="刷新监测历史" aria-label="刷新监测历史" onClick={refresh}><RefreshCw size={16} className={loading ? "spin" : ""} /></button>
