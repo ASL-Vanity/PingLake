@@ -1241,6 +1241,7 @@ dependencies = [
  "pinglake-protocol",
  "rand 0.9.5",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "surge-ping",

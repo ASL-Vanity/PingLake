@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -14,7 +13,6 @@ use pinglake_protocol::{
     ServiceResult,
 };
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 use tokio::{sync::Notify, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -23,6 +21,7 @@ use crate::{
     client::{ApiClient, SendError},
     metrics::MetricCollector,
     probes::{ProbePolicy, run_probe, validate_target},
+    spool::Spool,
     state::AgentState,
 };
 
@@ -30,7 +29,6 @@ const QUEUE_CAPACITY: usize = 64;
 // Reserve room for sample_age_ms to grow while the report waits for upload.
 const MAX_REPORT_BYTES: usize = 256 * 1024 - 1024;
 const MAX_SAMPLE_AGE: Duration = Duration::from_secs(300);
-const MAX_QUEUE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 struct QueuedReport {
@@ -39,29 +37,11 @@ struct QueuedReport {
     queued_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistedReport {
-    report: MetricReport,
-    queued_at: DateTime<Utc>,
-}
-
 fn load_queue(path: &Path) -> Result<VecDeque<QueuedReport>> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(VecDeque::new());
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if metadata.len() > MAX_QUEUE_FILE_BYTES {
-        bail!("pending report queue exceeds the supported size");
-    }
-    let bytes = fs::read(path)?;
-    let persisted: Vec<PersistedReport> = serde_json::from_slice(&bytes)
-        .map_err(|error| anyhow::anyhow!("pending report queue is invalid: {error}"))?;
-    let now = Utc::now();
+    let spool = Spool::open(path, "legacy-agent", "legacy-hub")?;
     let mut queue = VecDeque::new();
-    for item in persisted.into_iter().rev().take(QUEUE_CAPACITY).rev() {
+    let now = Utc::now();
+    for item in spool.restore()? {
         let age = now
             .signed_duration_since(item.queued_at)
             .to_std()
@@ -75,42 +55,20 @@ fn load_queue(path: &Path) -> Result<VecDeque<QueuedReport>> {
     Ok(queue)
 }
 
-fn persist_queue(path: &Path, shared: &Shared, persist_lock: &Arc<Mutex<()>>) -> Result<()> {
-    let _persist_guard = persist_lock
-        .lock()
-        .map_err(|_| anyhow::anyhow!("pending report queue lock is poisoned"))?;
-    let mut records = shared
-        .queue
-        .iter()
-        .map(|item| PersistedReport {
-            report: item.report.clone(),
-            queued_at: item.queued_at,
-        })
-        .collect::<Vec<_>>();
+fn persist_queue(path: &Path, shared: &Shared, _persist_lock: &Arc<Mutex<()>>) -> Result<()> {
+    let spool = Spool::open(path, "legacy-agent", "legacy-hub")?;
+    let mut records = Vec::new();
     if let Some(item) = &shared.in_flight {
-        records.push(PersistedReport {
-            report: item.report.clone(),
-            queued_at: item.queued_at,
-        });
+        records.push((item.report.clone(), item.queued_at));
     }
-    if records.is_empty() {
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        return Ok(());
-    }
-    let bytes = serde_json::to_vec(&records)?;
-    if bytes.len() as u64 > MAX_QUEUE_FILE_BYTES {
-        bail!("pending report queue exceeds the supported size");
-    }
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, bytes)?;
-    fs::rename(temporary, path)?;
-    Ok(())
+    records.extend(
+        shared
+            .queue
+            .iter()
+            .map(|item| (item.report.clone(), item.queued_at)),
+    );
+    spool.replace_all(&records)
 }
-
 #[derive(Default)]
 struct Shared {
     health: AgentHealth,
@@ -406,7 +364,9 @@ async fn collect_loop(
             .insert("browser_endpoint".into(), shared.endpoint.clone());
         fit_report_budget(&mut report)?;
         shared.push(report, started);
-        persist_queue(&queue_path, &shared, &persist_lock)?;
+        if let Err(error) = persist_queue(&queue_path, &shared, &persist_lock) {
+            tracing::error!(reason=%error, "spool persistence degraded; collection continues");
+        }
         changed.notify_one();
     }
 }
@@ -441,7 +401,9 @@ async fn send_loop(
             let next = shared.queue.pop_front();
             shared.in_flight = next.clone();
             shared.health.queue_length = shared.queue.len();
-            persist_queue(&queue_path, &shared, &persist_lock)?;
+            if let Err(error) = persist_queue(&queue_path, &shared, &persist_lock) {
+                tracing::error!(reason=%error, "spool persistence degraded; collection continues");
+            }
             next
         };
         let Some(mut next) = next else {
@@ -455,7 +417,9 @@ async fn send_loop(
                 let mut shared = shared.lock().unwrap();
                 shared.in_flight = None;
                 shared.drop_report();
-                persist_queue(&queue_path, &shared, &persist_lock)?;
+                if let Err(error) = persist_queue(&queue_path, &shared, &persist_lock) {
+                    tracing::error!(reason=%error, "spool persistence degraded; collection continues");
+                }
                 break;
             }
             if let Some(data) = &mut next.report.monitoring {
@@ -470,7 +434,7 @@ async fn send_loop(
                     let mut shared = shared.lock().unwrap();
                     shared.in_flight = None;
                     shared.push(next.report.clone(), next.collected);
-                    persist_queue(&queue_path, &shared, &persist_lock)?;
+                    if let Err(error) = persist_queue(&queue_path, &shared, &persist_lock) { tracing::error!(reason=%error, "spool persistence degraded; collection continues"); }
                     return Ok(())
                 },
                 result = client.send_metrics(state.agent_id, &state.agent_secret, &next.report) => result,
@@ -484,7 +448,9 @@ async fn send_loop(
                 Ok(()) => {
                     let mut shared = shared.lock().unwrap();
                     shared.in_flight = None;
-                    persist_queue(&queue_path, &shared, &persist_lock)?;
+                    if let Err(error) = persist_queue(&queue_path, &shared, &persist_lock) {
+                        tracing::error!(reason=%error, "spool persistence degraded; collection continues");
+                    }
                     break;
                 }
                 Err(SendError::Unauthorized) => {
@@ -502,7 +468,7 @@ async fn send_loop(
                     let mut shared = shared.lock().unwrap();
                     shared.in_flight = None;
                     shared.push(next.report.clone(), next.collected);
-                    persist_queue(&queue_path, &shared, &persist_lock)?;
+                    if let Err(error) = persist_queue(&queue_path, &shared, &persist_lock) { tracing::error!(reason=%error, "spool persistence degraded; collection continues"); }
                     return Ok(())
                 }
                 _ = tokio::time::sleep(delay) => {}

@@ -5,6 +5,7 @@ mod metrics;
 mod monitoring_runtime;
 mod probes;
 mod services;
+mod spool;
 mod state;
 
 #[cfg(target_os = "windows")]
@@ -74,7 +75,6 @@ struct PreparedAgent {
 
 impl PreparedAgent {
     fn new(settings: Settings, state_store: StateStore) -> Result<Self> {
-        let queue_path = state_store.directory().join("pending-reports.json");
         let probe_policy = probes::ProbePolicy {
             allow_private: settings.allow_private_probe_targets,
             allow_loopback: settings.allow_loopback_probe_targets,
@@ -98,6 +98,7 @@ impl PreparedAgent {
             )
         }
         let state = loaded_state.state;
+        let queue_path = state_store.directory().join("agent-spool.sqlite");
         let client = ApiClient::new(settings.hub_url, settings.insecure_skip_verify)?;
 
         let collector = MetricCollector::new();

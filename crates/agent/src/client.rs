@@ -35,6 +35,9 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
+    pub fn binding(&self) -> String {
+        self.enroll_url.origin().ascii_serialization()
+    }
     pub fn new(mut hub_url: Url, insecure_skip_verify: bool) -> anyhow::Result<Self> {
         hub_url.set_path(ENROLL_PATH);
         let enroll_url = hub_url.clone();
