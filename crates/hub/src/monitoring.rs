@@ -1027,14 +1027,13 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         {
             return Err(invalid("DNS check time outside accepted window"));
         }
-        if let (Some(scheduled), Some(completed)) = (check.scheduled_at, check.completed_at) {
-            if scheduled < earliest
+        if let (Some(scheduled), Some(completed)) = (check.scheduled_at, check.completed_at)
+            && (scheduled < earliest
                 || scheduled > latest
                 || completed < scheduled
-                || completed > latest
-            {
-                return Err(invalid("DNS check timestamps outside accepted window"));
-            }
+                || completed > latest)
+        {
+            return Err(invalid("DNS check timestamps outside accepted window"));
         }
         if check.status == CheckStatus::Ok && check.latency_ms.is_none() {
             return Err(invalid("successful DNS check needs a latency"));
@@ -1063,14 +1062,13 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         {
             return Err(invalid("process check time outside accepted window"));
         }
-        if let (Some(scheduled), Some(completed)) = (check.scheduled_at, check.completed_at) {
-            if scheduled < earliest
+        if let (Some(scheduled), Some(completed)) = (check.scheduled_at, check.completed_at)
+            && (scheduled < earliest
                 || scheduled > latest
                 || completed < scheduled
-                || completed > latest
-            {
-                return Err(invalid("process check timestamps outside accepted window"));
-            }
+                || completed > latest)
+        {
+            return Err(invalid("process check timestamps outside accepted window"));
         }
         if let Some(error) = &check.error {
             bounded_error(error)?;
@@ -1102,16 +1100,15 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         {
             return Err(invalid("local port check time outside accepted window"));
         }
-        if let (Some(scheduled), Some(completed)) = (check.scheduled_at, check.completed_at) {
-            if scheduled < earliest
+        if let (Some(scheduled), Some(completed)) = (check.scheduled_at, check.completed_at)
+            && (scheduled < earliest
                 || scheduled > latest
                 || completed < scheduled
-                || completed > latest
-            {
-                return Err(invalid(
-                    "local port check timestamps outside accepted window",
-                ));
-            }
+                || completed > latest)
+        {
+            return Err(invalid(
+                "local port check timestamps outside accepted window",
+            ));
         }
         if let Some(error) = &check.error {
             bounded_error(error)?;

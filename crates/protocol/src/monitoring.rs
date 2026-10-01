@@ -20,22 +20,17 @@ pub enum MetricStatus {
 /// status used by resource metrics and capabilities; this type adds the
 /// check-specific policy outcome while keeping the same wire spellings for
 /// the common states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     Ok,
     WarmingUp,
     Unsupported,
     PermissionDenied,
+    #[default]
     Unavailable,
     Stale,
     PolicyDenied,
-}
-
-impl Default for CheckStatus {
-    fn default() -> Self {
-        Self::Unavailable
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -351,20 +346,15 @@ fn timeout() -> u64 {
     5_000
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeKind {
     #[serde(rename = "icmp")]
+    #[default]
     Icmp,
     Tcp,
     Http,
     Dns,
-}
-
-impl Default for ProbeKind {
-    fn default() -> Self {
-        Self::Icmp
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

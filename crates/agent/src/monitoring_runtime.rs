@@ -164,6 +164,7 @@ impl Shared {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     client: ApiClient,
     state: AgentState,
@@ -238,6 +239,7 @@ pub async fn run(
     result.map(|_| ())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn collect_loop(
     mut collector: MetricCollector,
     interval: u64,
