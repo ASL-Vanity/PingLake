@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use pinglake_protocol::{
-    AgentHealth, Capability, CheckStatus, DnsResult, LocalPortResult, MetricReport, MetricStatus,
+    AgentHealth, Capability, CheckStatus, LocalPortResult, MetricReport, MetricStatus,
     MonitoringData, NodeMonitoringConfig, ProbeKind, ProbeResult, ProbeTarget, ProcessResult,
     ServiceResult,
 };
@@ -183,6 +183,7 @@ pub async fn run(
         send_loop(
             client.clone(),
             state.clone(),
+            monitoring_schema_max,
             shared.clone(),
             changed,
             queue_path,
@@ -240,47 +241,6 @@ async fn collect_loop(
         data.agent = shared.health.clone();
         data.services = shared.services.clone();
         data.probes = shared.probes.iter().cloned().collect();
-        data.dns_checks = data
-            .probes
-            .iter()
-            .filter(|probe| probe.kind == ProbeKind::Dns)
-            .map(|probe| DnsResult {
-                id: probe.target_id,
-                name: probe.target_id.to_string(),
-                sample_id: probe.sample_id,
-                config_revision: probe.config_revision,
-                scheduled_at: Some(probe.scheduled_at),
-                completed_at: Some(probe.completed_at),
-                checked_at: Some(probe.completed_at),
-                status: CheckStatus::from(probe.status.clone()),
-                hostname: shared
-                    .config
-                    .probes
-                    .iter()
-                    .find(|target| target.id == probe.target_id)
-                    .map(|target| target.target.clone())
-                    .or_else(|| {
-                        shared
-                            .config
-                            .dns_checks
-                            .iter()
-                            .find(|target| target.id == probe.target_id)
-                            .map(|target| target.hostname.clone())
-                    })
-                    .unwrap_or_default(),
-                record_type: shared
-                    .config
-                    .dns_checks
-                    .iter()
-                    .find(|target| target.id == probe.target_id)
-                    .map(|target| target.record_type.clone())
-                    .unwrap_or_else(|| "A/AAAA".into()),
-                answers: Vec::new(),
-                latency_ms: probe.latency_ms,
-                error: probe.error.clone(),
-                reason: probe.error.clone(),
-            })
-            .collect();
         let process_ids = shared
             .config
             .process_checks
@@ -294,11 +254,12 @@ async fn collect_loop(
             .map(|service| ProcessResult {
                 id: service.id,
                 name: service.name.clone(),
-                sample_id: Uuid::new_v4(),
-                config_revision: service.config_revision,
+                sample_id: Some(Uuid::new_v4()),
+                config_revision: Some(service.config_revision),
                 scheduled_at: Some(service.checked_at),
                 completed_at: Some(service.checked_at),
                 checked_at: Some(service.checked_at),
+                healthy: service.healthy,
                 status: match service.status {
                     MetricStatus::Ok => CheckStatus::Ok,
                     MetricStatus::PermissionDenied => CheckStatus::PermissionDenied,
@@ -335,13 +296,17 @@ async fn collect_loop(
                 LocalPortResult {
                     id: check.id,
                     name: check.name.clone(),
-                    sample_id: Uuid::new_v4(),
-                    config_revision: shared.config.revision,
+                    sample_id: Some(Uuid::new_v4()),
+                    config_revision: Some(shared.config.revision),
                     scheduled_at: Some(report.collected_at),
                     completed_at: Some(report.collected_at),
                     checked_at: Some(report.collected_at),
                     status: CheckStatus::Ok,
-                    address: check.address.clone(),
+                    healthy: Some(listening),
+                    address_scope: check.address_scope.clone(),
+                    address_family: check.address_family,
+                    protocol: check.protocol,
+                    observed_addresses: Vec::new(),
                     port: check.port,
                     latency_ms: None,
                     error: if listening {
@@ -379,7 +344,6 @@ fn downgrade_monitoring_to_v1(data: &mut MonitoringData) {
             ProbeKind::Icmp | ProbeKind::Tcp | ProbeKind::Http
         )
     });
-    data.dns_checks.clear();
     data.process_checks.clear();
     data.local_port_checks.clear();
 }
@@ -387,6 +351,7 @@ fn downgrade_monitoring_to_v1(data: &mut MonitoringData) {
 async fn send_loop(
     client: ApiClient,
     state: AgentState,
+    monitoring_schema_max: u32,
     shared: Arc<Mutex<Shared>>,
     changed: Arc<Notify>,
     queue_path: PathBuf,
@@ -437,7 +402,7 @@ async fn send_loop(
                     if let Err(error) = persist_queue(&queue_path, &shared, &persist_lock) { tracing::error!(reason=%error, "spool persistence degraded; collection continues"); }
                     return Ok(())
                 },
-                result = client.send_metrics(state.agent_id, &state.agent_secret, &next.report) => result,
+                result = client.send_metrics_with_schema(state.agent_id, &state.agent_secret, &next.report, monitoring_schema_max) => result,
             };
             shared.lock().unwrap().outcome(
                 result.is_ok(),
@@ -492,7 +457,6 @@ fn validate_config(config: &NodeMonitoringConfig) -> Result<()> {
     if config.services.len() > 32
         || config.process_checks.len() > 32
         || config.probes.len() > 32
-        || config.dns_checks.len() > 32
         || config.local_port_checks.len() > 32
     {
         bail!("monitor configuration exceeds target limits");
@@ -527,22 +491,6 @@ fn validate_config(config: &NodeMonitoringConfig) -> Result<()> {
                 .any(|c| c == '/' || c == '\\' || c.is_control())
         {
             bail!("invalid process configuration");
-        }
-    }
-    for check in &config.dns_checks {
-        if check.id.is_nil()
-            || !ids.insert(check.id)
-            || check.name.trim().is_empty()
-            || check.name.len() > 128
-            || check.hostname.trim().is_empty()
-            || check.hostname.len() > 253
-            || !matches!(check.record_type.as_str(), "A" | "AAAA")
-            || !(10..=86_400).contains(&check.interval_secs)
-            || check.timeout_ms == 0
-            || check.timeout_ms > 10_000
-            || check.timeout_ms >= check.interval_secs * 1000
-        {
-            bail!("invalid DNS check configuration");
         }
     }
     for check in &config.local_port_checks {
@@ -672,25 +620,7 @@ fn due_probes(
     origin: Instant,
     now: Instant,
 ) -> Vec<ProbeTarget> {
-    let mut configured = config.probes.clone();
-    configured.extend(
-        config
-            .dns_checks
-            .iter()
-            .filter(|check| check.enabled)
-            .map(|check| ProbeTarget {
-                id: check.id,
-                name: check.name.clone(),
-                kind: ProbeKind::Dns,
-                target: check.hostname.clone(),
-                port: None,
-                enabled: true,
-                interval_secs: check.interval_secs,
-                timeout_ms: check.timeout_ms,
-                expected_status: None,
-                response_contains: None,
-            }),
-    );
+    let configured = config.probes.clone();
     let mut due = configured
         .iter()
         .filter(|target| {
@@ -812,9 +742,11 @@ mod tests {
                     scheduled_at: Utc::now(),
                     completed_at: Utc::now(),
                     status: pinglake_protocol::ProbeStatus::Success,
+                    healthy: Some(true),
                     latency_ms: Some(1.0),
                     http_status: None,
                     error: None,
+                    dns: None,
                 },
                 ProbeResult {
                     sample_id: Uuid::new_v4(),
@@ -824,12 +756,13 @@ mod tests {
                     scheduled_at: Utc::now(),
                     completed_at: Utc::now(),
                     status: pinglake_protocol::ProbeStatus::Success,
+                    healthy: Some(true),
                     latency_ms: Some(1.0),
                     http_status: Some(200),
                     error: None,
+                    dns: None,
                 },
             ],
-            dns_checks: vec![DnsResult::default()],
             process_checks: vec![ProcessResult::default()],
             local_port_checks: vec![LocalPortResult::default()],
             ..Default::default()
@@ -838,7 +771,6 @@ mod tests {
         assert_eq!(data.schema_version, 1);
         assert_eq!(data.probes.len(), 1);
         assert_eq!(data.probes[0].kind, ProbeKind::Http);
-        assert!(data.dns_checks.is_empty());
         assert!(data.process_checks.is_empty());
         assert!(data.local_port_checks.is_empty());
     }
@@ -898,6 +830,7 @@ mod tests {
                     timeout_ms: 9999,
                     expected_status: None,
                     response_contains: None,
+                    dns: None,
                 })
                 .collect(),
             ..Default::default()
@@ -1010,6 +943,7 @@ mod tests {
         let send = tokio::spawn(send_loop(
             client,
             state,
+            2,
             shared.clone(),
             changed,
             queue_path,

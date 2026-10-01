@@ -117,9 +117,11 @@ pub async fn run_probe(target: ProbeTarget, revision: u64, policy: ProbePolicy) 
         scheduled_at,
         completed_at: scheduled_at,
         status: ProbeStatus::Failure,
+        healthy: None,
         latency_ms: None,
         http_status: None,
         error: None,
+        dns: None,
     };
     if let Err(error) = validate_target(&target) {
         result.status = ProbeStatus::PolicyDenied;
@@ -130,11 +132,13 @@ pub async fn run_probe(target: ProbeTarget, revision: u64, policy: ProbePolicy) 
     match tokio::time::timeout(duration, execute(&target, policy)).await {
         Ok(Ok((latency, status))) => {
             result.status = ProbeStatus::Success;
+            result.healthy = Some(true);
             result.latency_ms = Some(latency);
             result.http_status = status;
         }
         Ok(Err((status, error, http_status))) => {
             result.status = status;
+            result.healthy = Some(false);
             result.error = Some(error);
             result.http_status = http_status;
         }
@@ -398,6 +402,7 @@ mod tests {
             timeout_ms: 200,
             expected_status: None,
             response_contains: None,
+            dns: None,
         }
     }
     #[test]

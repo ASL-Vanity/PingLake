@@ -66,7 +66,7 @@ impl Spool {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);\
-            CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, queued_at TEXT NOT NULL, state TEXT NOT NULL, payload BLOB NOT NULL);\
+            CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, queued_at TEXT NOT NULL, state TEXT NOT NULL, payload BLOB NOT NULL, canonical BLOB NOT NULL);\
             CREATE INDEX IF NOT EXISTS reports_ready ON reports(state, id);")?;
         let existing: Option<String> = conn
             .query_row("SELECT value FROM meta WHERE key='binding'", [], |r| {
@@ -126,6 +126,7 @@ impl Spool {
     pub fn enqueue(&self, report: &MetricReport, queued_at: DateTime<Utc>) -> Result<(i64, u64)> {
         let conn = self.conn()?;
         let bytes = serde_json::to_vec(report)?;
+        let canonical = report.canonical_content_bytes()?;
         let tx = conn.unchecked_transaction()?;
         let count: i64 = tx.query_row("SELECT count(*) FROM reports", [], |r| r.get(0))?;
         let mut dropped = 0;
@@ -137,8 +138,8 @@ impl Spool {
             dropped = 1;
         }
         tx.execute(
-            "INSERT INTO reports(queued_at,state,payload) VALUES(?1,'pending',?2)",
-            params![queued_at.to_rfc3339(), bytes],
+            "INSERT INTO reports(queued_at,state,payload,canonical) VALUES(?1,'pending',?2,?3)",
+            params![queued_at.to_rfc3339(), bytes, canonical],
         )?;
         let id = tx.last_insert_rowid();
         tx.commit()?;
@@ -170,8 +171,12 @@ impl Spool {
         tx.execute("DELETE FROM reports", [])?;
         for (report, at) in reports {
             tx.execute(
-                "INSERT INTO reports(queued_at,state,payload) VALUES(?1,'pending',?2)",
-                params![at.to_rfc3339(), serde_json::to_vec(report)?],
+                "INSERT INTO reports(queued_at,state,payload,canonical) VALUES(?1,'pending',?2,?3)",
+                params![
+                    at.to_rfc3339(),
+                    serde_json::to_vec(report)?,
+                    report.canonical_content_bytes()?
+                ],
             )?;
         }
         tx.commit()?;

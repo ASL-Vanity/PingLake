@@ -83,12 +83,27 @@ impl ApiClient {
         agent_secret: &str,
         report: &MetricReport,
     ) -> Result<(), SendError> {
+        self.send_metrics_with_schema(agent_id, agent_secret, report, 1)
+            .await
+    }
+
+    pub async fn send_metrics_with_schema(
+        &self,
+        agent_id: Uuid,
+        agent_secret: &str,
+        report: &MetricReport,
+        monitoring_schema_max: u32,
+    ) -> Result<(), SendError> {
+        let body = report
+            .to_wire_json(monitoring_schema_max)
+            .map_err(|_| SendError::Permanent(StatusCode::UNPROCESSABLE_ENTITY))?;
         let response = self
             .client
             .post(self.metrics_url.clone())
             .header("X-Agent-ID", agent_id.to_string())
             .bearer_auth(agent_secret)
-            .json(report)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
             .send()
             .await
             .map_err(transport_error)?;
