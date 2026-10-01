@@ -64,6 +64,10 @@ starting.
   container network namespaces.
 - Start Docker before running the Linux Agent image build and Hub Compose
   checks. The Docker daemon was unavailable during this verification.
+- The installed Windows Rust toolchain has the Linux target, but the Linux
+  cross-check could not build `ring` because `x86_64-linux-gnu-gcc` is absent.
+  The available WSL distribution did not have Rust/Cargo installed, so it could
+  not substitute for the missing Linux build environment during this run.
 - Perform a real SQLite backup including WAL, v4-to-v5 migration rehearsal,
   restore rehearsal, Hub-first upgrade, staged Agent upgrade and rollback.
 
