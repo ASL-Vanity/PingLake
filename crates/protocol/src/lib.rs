@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -85,6 +87,90 @@ pub struct MetricReport {
     pub interfaces: Vec<InterfaceMetric>,
     #[serde(default)]
     pub monitoring: Option<MonitoringData>,
+}
+
+impl MetricReport {
+    /// Serialize a report for the negotiated Hub schema. A v1 receiver gets
+    /// the original resource/service/ICMP/TCP/HTTP report shape; v2-only
+    /// process, local-port and DNS fields are omitted from the wire object.
+    /// New Agents must use this for retries and downgrade replays.
+    pub fn to_wire_json(&self, monitoring_schema_max: u32) -> serde_json::Result<Vec<u8>> {
+        let mut value = serde_json::to_value(self)?;
+        if monitoring_schema_max < MONITORING_SCHEMA_V2 {
+            downgrade_report_value(&mut value);
+        }
+        serde_json::to_vec(&value)
+    }
+
+    /// Return canonical content bytes for the Hub's same-identity conflict
+    /// check. Identity envelope fields and all Agent transport health fields,
+    /// including `sample_age_ms`, are excluded. The Hub may hash these bytes
+    /// with SHA-256; retransmission metadata therefore cannot create a false
+    /// payload conflict.
+    pub fn canonical_content_bytes(&self) -> serde_json::Result<Vec<u8>> {
+        let mut value = serde_json::to_value(self)?;
+        if let Some(monitoring) = value
+            .get_mut("monitoring")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for key in [
+                "schema_version",
+                "session_id",
+                "sample_sequence",
+                "report_interval_secs",
+                "agent",
+            ] {
+                monitoring.remove(key);
+            }
+        }
+        serde_json::to_vec(&value)
+    }
+}
+
+fn downgrade_report_value(value: &mut serde_json::Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(monitoring) = object
+        .get_mut("monitoring")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    monitoring.insert(
+        "schema_version".into(),
+        serde_json::Value::from(MONITORING_SCHEMA_V1),
+    );
+    monitoring.remove("process_checks");
+    monitoring.remove("local_port_checks");
+    let Some(probes) = monitoring
+        .get_mut("probes")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    probes.retain(|probe| probe.get("kind").and_then(serde_json::Value::as_str) != Some("dns"));
+    for probe in probes {
+        let Some(probe) = probe.as_object_mut() else {
+            continue;
+        };
+        probe.remove("dns");
+        if let Some(status) = probe
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        {
+            let downgraded = match status.as_str() {
+                "warming_up" | "stale" => "unsupported",
+                "unavailable" => "failure",
+                _ => status.as_str(),
+            };
+            probe.insert(
+                "status".into(),
+                serde_json::Value::String(downgraded.into()),
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,12 +322,93 @@ pub struct ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::EnrollResponse;
+    use super::{
+        AgentHealth, EnrollResponse, MONITORING_SCHEMA_V1, MONITORING_SCHEMA_V2, MetricReport,
+        MonitoringData, ProbeResult, ProbeStatus, Uuid,
+    };
 
     #[test]
     fn legacy_enrollment_response_defaults_to_v1_monitoring() {
         let response: EnrollResponse =
             serde_json::from_str(r#"{"accepted":true,"report_interval_secs":5}"#).unwrap();
         assert_eq!(response.monitoring_schema_max, 1);
+    }
+
+    #[test]
+    fn v1_report_wire_downgrade_omits_v2_results_and_dns() {
+        let report: MetricReport = serde_json::from_value(serde_json::json!({
+            "collected_at":"2026-10-01T00:00:00Z","cpu_percent":1.0,
+            "memory_used_bytes":1,"memory_total_bytes":2,"swap_used_bytes":0,"swap_total_bytes":0,
+            "disk_used_bytes":0,"disk_total_bytes":1,"network_received_bytes_per_sec":0,
+            "network_transmitted_bytes_per_sec":0,"load_one":null,"load_five":null,"load_fifteen":null,
+            "temperature_celsius":null,"uptime_seconds":1,"process_count":0,"disks":[],"interfaces":[],
+            "monitoring": {"schema_version":2,"session_id":"00000000-0000-0000-0000-000000000001",
+              "sample_sequence":1,"report_interval_secs":30,"capabilities":{},"cpu_cores":[],
+              "cpu_times":{},"memory":{},"disk_io":[],"inodes":[],"network_health":[],"tcp":{},"agent":{},
+              "services":[],"process_checks":[{"id":"00000000-0000-0000-0000-000000000002","name":"p","status":"ok","process_name":"p"}],
+              "local_port_checks":[],"probes":[{"sample_id":"00000000-0000-0000-0000-000000000003","target_id":"00000000-0000-0000-0000-000000000004","config_revision":1,"kind":"dns","scheduled_at":"2026-10-01T00:00:00Z","completed_at":"2026-10-01T00:00:00Z","status":"failure","healthy":false,"latency_ms":null,"http_status":null,"error":"dns","dns":{"record_type":"A","rcode":3,"answers":[]}}]
+            }
+        })).unwrap();
+        let wire: serde_json::Value =
+            serde_json::from_slice(&report.to_wire_json(MONITORING_SCHEMA_V1).unwrap()).unwrap();
+        let monitoring = &wire["monitoring"];
+        assert_eq!(monitoring["schema_version"], MONITORING_SCHEMA_V1);
+        assert!(monitoring.get("process_checks").is_none());
+        assert!(monitoring["probes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn canonical_content_excludes_agent_transport_metadata() {
+        let mut report = MetricReport {
+            collected_at: chrono::Utc::now(),
+            cpu_percent: 1.0,
+            memory_used_bytes: 0,
+            memory_total_bytes: 1,
+            swap_used_bytes: 0,
+            swap_total_bytes: 0,
+            disk_used_bytes: 0,
+            disk_total_bytes: 1,
+            network_received_bytes_per_sec: 0,
+            network_transmitted_bytes_per_sec: 0,
+            hub_latency_ms: None,
+            load_one: None,
+            load_five: None,
+            load_fifteen: None,
+            temperature_celsius: None,
+            uptime_seconds: 1,
+            process_count: 0,
+            processes: vec![],
+            disks: vec![],
+            interfaces: vec![],
+            monitoring: Some(MonitoringData {
+                schema_version: MONITORING_SCHEMA_V2,
+                session_id: Uuid::new_v4(),
+                sample_sequence: 1,
+                agent: AgentHealth {
+                    sample_age_ms: 1.0,
+                    upload_attempts: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        };
+        let first = report.canonical_content_bytes().unwrap();
+        report.monitoring.as_mut().unwrap().agent.sample_age_ms = 9999.0;
+        report.monitoring.as_mut().unwrap().sample_sequence = 2;
+        assert_eq!(first, report.canonical_content_bytes().unwrap());
+        report.cpu_percent = 2.0;
+        assert_ne!(first, report.canonical_content_bytes().unwrap());
+    }
+
+    #[test]
+    fn v2_probe_keeps_dns_observation_optional_for_old_normal_reports() {
+        let result: ProbeResult = serde_json::from_value(serde_json::json!({
+            "sample_id":"00000000-0000-0000-0000-000000000003","target_id":"00000000-0000-0000-0000-000000000004",
+            "config_revision":1,"kind":"http","scheduled_at":"2026-10-01T00:00:00Z","completed_at":"2026-10-01T00:00:00Z",
+            "status":"success","latency_ms":1.0,"http_status":200,"error":null
+        })).unwrap();
+        assert!(result.dns.is_none());
+        assert_eq!(ProbeStatus::Success, ProbeStatus::Success);
+        assert_eq!(MONITORING_SCHEMA_V2, 2);
     }
 }

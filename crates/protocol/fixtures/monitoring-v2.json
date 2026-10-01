@@ -2,19 +2,34 @@
   "schema_version": 2,
   "session_id": "00000000-0000-0000-0000-000000000001",
   "sample_sequence": 7,
+  "report_interval_secs": 30,
   "capabilities": {},
-  "dns_checks": [{
-    "id": "00000000-0000-0000-0000-000000000002",
-    "name": "public-dns",
+  "cpu_cores": [],
+  "cpu_times": {},
+  "memory": {},
+  "disk_io": [],
+  "inodes": [],
+  "network_health": [],
+  "tcp": {},
+  "agent": {},
+  "services": [],
+  "probes": [{
     "sample_id": "00000000-0000-0000-0000-000000000012",
+    "target_id": "00000000-0000-0000-0000-000000000002",
     "config_revision": 4,
+    "kind": "dns",
     "scheduled_at": "2026-10-01T00:00:00Z",
-    "completed_at": "2026-10-01T00:00:00Z",
-    "hostname": "example.test",
-    "record_type": "A",
-    "status": "ok",
+    "completed_at": "2026-10-01T00:00:00.012Z",
+    "status": "success",
+    "healthy": true,
     "latency_ms": 1.2,
-    "answers": ["192.0.2.1"]
+    "http_status": null,
+    "error": null,
+    "dns": {
+      "record_type": "A",
+      "rcode": 0,
+      "answers": ["192.0.2.1"]
+    }
   }],
   "process_checks": [{
     "id": "00000000-0000-0000-0000-000000000003",
@@ -22,10 +37,14 @@
     "sample_id": "00000000-0000-0000-0000-000000000013",
     "config_revision": 4,
     "scheduled_at": "2026-10-01T00:00:00Z",
-    "completed_at": "2026-10-01T00:00:00Z",
-    "process_name": "worker",
+    "completed_at": "2026-10-01T00:00:00.010Z",
     "status": "permission_denied",
-    "error": "permission denied"
+    "healthy": null,
+    "process_name": "worker",
+    "count": null,
+    "expected_count": 1,
+    "error": "permission denied",
+    "reason": "process_query_denied"
   }],
   "local_port_checks": [{
     "id": "00000000-0000-0000-0000-000000000004",
@@ -33,8 +52,16 @@
     "sample_id": "00000000-0000-0000-0000-000000000014",
     "config_revision": 4,
     "scheduled_at": "2026-10-01T00:00:00Z",
-    "completed_at": "2026-10-01T00:00:00Z",
+    "completed_at": "2026-10-01T00:00:00.008Z",
+    "status": "ok",
+    "healthy": true,
+    "address_scope": {"scope": "loopback"},
+    "address_family": "ipv4",
+    "protocol": "tcp",
     "port": 8080,
-    "status": "unavailable"
+    "observed_addresses": ["127.0.0.1"],
+    "latency_ms": null,
+    "error": null,
+    "reason": null
   }]
 }
