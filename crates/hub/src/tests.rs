@@ -331,8 +331,11 @@ async fn authenticated_metrics_are_persisted_and_returned_as_history() {
     assert_eq!(history_response.status(), StatusCode::OK);
     let history: Vec<HistoryPoint> = response_json(history_response).await;
     assert_eq!(history.len(), 1);
-    assert!(history[0].collected_at >= server_time_before_report - chrono::Duration::seconds(1));
-    assert!(history[0].collected_at > report.collected_at + chrono::Duration::days(29));
+    assert!(history[0].collected_at < server_time_before_report - chrono::Duration::days(29));
+    assert_eq!(
+        history[0].collected_at.timestamp_millis(),
+        report.collected_at.timestamp_millis()
+    );
     assert_eq!(history[0].cpu_percent, report.cpu_percent);
     assert_eq!(history[0].memory_used_bytes, report.memory_used_bytes);
 

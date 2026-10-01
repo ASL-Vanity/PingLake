@@ -318,7 +318,7 @@ impl Database {
 
         let cutoff = Utc::now() - chrono::Duration::minutes(minutes as i64);
         let mut statement = connection.prepare(
-            "SELECT received_at, cpu_percent, memory_used_bytes, memory_total_bytes,
+            "SELECT collected_at, cpu_percent, memory_used_bytes, memory_total_bytes,
                     disk_used_bytes, disk_total_bytes, network_received_bytes_per_sec,
                     network_transmitted_bytes_per_sec, hub_latency_ms, temperature_celsius
              FROM metrics
@@ -1163,6 +1163,7 @@ fn migrate(connection: &Connection) -> Result<()> {
              CREATE INDEX metrics_node_received_idx
                 ON metrics(node_id, received_at DESC);
              CREATE INDEX metrics_received_idx ON metrics(received_at);
+             CREATE INDEX metrics_collected_idx ON metrics(node_id, collected_at DESC);
              CREATE INDEX alerts_opened_idx ON alerts(opened_at DESC);
              CREATE UNIQUE INDEX alerts_one_active_kind_idx
                 ON alerts(node_id, kind) WHERE active = 1;
@@ -1214,7 +1215,7 @@ fn migrate(connection: &Connection) -> Result<()> {
         transaction.execute_batch(
             "ALTER TABLE nodes ADD COLUMN browser_latency_url TEXT;
              ALTER TABLE alerts ADD COLUMN subject_id TEXT NOT NULL DEFAULT '';
-             DROP INDEX alerts_one_active_kind_idx;
+             DROP INDEX IF EXISTS alerts_one_active_kind_idx;
              CREATE UNIQUE INDEX alerts_one_active_kind_idx ON alerts(node_id, kind, subject_id) WHERE active = 1;
              ALTER TABLE metrics ADD COLUMN monitoring_json TEXT;
              ALTER TABLE metrics ADD COLUMN monitoring_session TEXT;
@@ -1240,6 +1241,7 @@ fn migrate(connection: &Connection) -> Result<()> {
                 PRIMARY KEY(node_id, sample_id)
              );
              CREATE INDEX probe_samples_target_time_idx ON probe_samples(node_id, target_id, scheduled_at);
+             CREATE INDEX probe_samples_target_received_idx ON probe_samples(node_id, target_id, received_at DESC);
              CREATE INDEX probe_samples_received_idx ON probe_samples(node_id, received_at DESC);
              CREATE INDEX probe_samples_retention_idx ON probe_samples(received_at);
              CREATE TABLE service_samples (
@@ -1252,6 +1254,7 @@ fn migrate(connection: &Connection) -> Result<()> {
                 PRIMARY KEY(node_id, subject_id, config_revision, checked_at)
              );
              CREATE INDEX service_samples_time_idx ON service_samples(node_id, checked_at);
+             CREATE INDEX service_samples_subject_time_idx ON service_samples(node_id, subject_id, checked_at);
              CREATE INDEX service_samples_received_idx ON service_samples(node_id, received_at DESC);
              CREATE INDEX service_samples_retention_idx ON service_samples(received_at);
              CREATE TABLE monitoring_check_state (
@@ -1266,7 +1269,37 @@ fn migrate(connection: &Connection) -> Result<()> {
         transaction.pragma_update(None, "user_version", 5)?;
         transaction.commit()?;
     }
+    ensure_monitoring_indexes(connection)?;
     Ok(())
+}
+
+fn ensure_monitoring_indexes(connection: &Connection) -> Result<()> {
+    if table_has_column(connection, "metrics", "collected_at")? {
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS metrics_collected_idx ON metrics(node_id, collected_at DESC);",
+        )?;
+    }
+    if table_has_column(connection, "probe_samples", "target_id")? {
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS probe_samples_target_received_idx ON probe_samples(node_id, target_id, received_at DESC);",
+        )?;
+    }
+    if table_has_column(connection, "service_samples", "subject_id")? {
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS service_samples_subject_time_idx ON service_samples(node_id, subject_id, checked_at);
+             CREATE INDEX IF NOT EXISTS service_samples_subject_received_idx ON service_samples(node_id, subject_id, received_at DESC);",
+        )?;
+    }
+    Ok(())
+}
+
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(columns
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == column))
 }
 
 fn percent(used: u64, total: u64) -> Option<f64> {
