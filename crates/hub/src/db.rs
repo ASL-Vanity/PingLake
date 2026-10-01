@@ -558,6 +558,10 @@ impl Database {
             [timestamp(cutoff)],
         )?;
         connection.execute(
+            "DELETE FROM check_samples WHERE received_at < ?1",
+            [timestamp(cutoff)],
+        )?;
+        connection.execute(
             "DELETE FROM monitoring_configs WHERE effective_at < ?1 AND revision < (
                 SELECT MAX(baseline.revision) FROM monitoring_configs baseline
                 WHERE baseline.node_id = monitoring_configs.node_id AND baseline.effective_at < ?1
@@ -1187,7 +1191,7 @@ fn get_settings_from(connection: &Connection) -> Result<AlertSettings> {
 
 fn migrate(connection: &Connection) -> Result<()> {
     let mut version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version > 5 {
+    if version > 6 {
         bail!("database schema version {version} is newer than this Hub supports");
     }
     if version == 0 {
@@ -1368,6 +1372,34 @@ fn migrate(connection: &Connection) -> Result<()> {
              );"
         )?;
         transaction.pragma_update(None, "user_version", 5)?;
+        transaction.commit()?;
+        version = 5;
+    }
+    if version == 5 {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute_batch(
+            "CREATE TABLE check_samples (
+                node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                sample_id TEXT NOT NULL,
+                config_revision INTEGER NOT NULL,
+                scheduled_at TEXT,
+                completed_at TEXT,
+                checked_at TEXT,
+                received_at TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                PRIMARY KEY(node_id, kind, sample_id, config_revision)
+             );
+             CREATE INDEX check_samples_subject_time_idx
+                ON check_samples(node_id, kind, subject_id, scheduled_at, checked_at);
+             CREATE INDEX check_samples_received_idx
+                ON check_samples(node_id, received_at DESC);
+             CREATE UNIQUE INDEX check_samples_identity_idx
+                ON check_samples(node_id, kind, sample_id, config_revision);",
+        )?;
+        transaction.pragma_update(None, "user_version", 6)?;
         transaction.commit()?;
     }
     ensure_monitoring_indexes(connection)?;
@@ -1555,7 +1587,16 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
+        );
+        assert!(
+            connection
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='check_samples'",
+                    [],
+                    |_| Ok(())
+                )
+                .is_ok()
         );
         assert_eq!(
             connection
@@ -1577,7 +1618,7 @@ mod tests {
         connection.execute("INSERT INTO alerts(node_id,kind,active,subject_id) VALUES('existing','service',1,'two')", []).unwrap();
         assert!(connection.execute("INSERT INTO alerts(node_id,kind,active,subject_id) VALUES('existing','service',1,'one')", []).is_err());
         migrate(&connection).unwrap();
-        connection.pragma_update(None, "user_version", 6).unwrap();
+        connection.pragma_update(None, "user_version", 7).unwrap();
         assert!(migrate(&connection).is_err());
     }
 

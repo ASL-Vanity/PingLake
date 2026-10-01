@@ -6,10 +6,11 @@ use axum::{
 use chrono::Utc;
 use http_body_util::BodyExt;
 use pinglake_protocol::{
-    AlertKind, AlertRecord, AlertSettings, CpuCore, EnrollRequest, HistoryPoint, HostGroup,
-    MetricReport, MetricStatus, MonitoringData, MonitoringHistoryPoint, NodeMonitoringConfig,
-    NodeSnapshot, ProbeKind, ProbeResult, ProbeStatistics, ProbeStatus, ProbeTarget, ServiceCheck,
-    ServiceResult,
+    AlertKind, AlertRecord, AlertSettings, CheckStatus, CpuCore, DnsCheck, DnsResult,
+    EnrollRequest, HistoryPoint, HostGroup, LocalPortCheck, LocalPortResult, MetricReport,
+    MetricStatus, MonitoringData, MonitoringHistoryPoint, NodeMonitoringConfig, NodeSnapshot,
+    ProbeKind, ProbeResult, ProbeStatistics, ProbeStatus, ProbeTarget, ProcessCheck, ProcessResult,
+    ServiceCheck, ServiceResult,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -895,6 +896,192 @@ async fn extended_samples_and_probe_ids_are_deduplicated_with_scoped_history() {
             Method::GET,
             &format!("/api/v1/nodes/{id}/monitoring/history?section=invalid"),
             &[("cookie", &cookie)]
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn v2_extension_checks_have_scoped_http_history_and_conflict_rejection() {
+    let context = TestContext::new();
+    let id = Uuid::new_v4();
+    enroll_monitoring_node(&context, id).await;
+    let cookie = context.login().await;
+    let dns_id = Uuid::new_v4();
+    let process_id = Uuid::new_v4();
+    let port_id = Uuid::new_v4();
+    let config = NodeMonitoringConfig {
+        dns_checks: vec![DnsCheck {
+            id: dns_id,
+            name: "DNS".into(),
+            hostname: "example.com".into(),
+            record_type: "A".into(),
+            expected_value: None,
+            enabled: true,
+            interval_secs: 30,
+            timeout_ms: 1000,
+        }],
+        process_checks: vec![ProcessCheck {
+            id: process_id,
+            name: "worker".into(),
+            process_name: "worker".into(),
+            expected_count: None,
+            enabled: true,
+            expected_state: "running".into(),
+            interval_secs: 30,
+            timeout_ms: 1000,
+        }],
+        local_port_checks: vec![LocalPortCheck {
+            id: port_id,
+            name: "HTTP".into(),
+            address: None,
+            port: 8080,
+            enabled: true,
+            interval_secs: 30,
+            timeout_ms: 1000,
+        }],
+        ..Default::default()
+    };
+    let saved: NodeMonitoringConfig = response_json(
+        send_serialized(
+            &context.app,
+            Method::PUT,
+            &format!("/api/v1/nodes/{id}/monitoring"),
+            &[("cookie", &cookie)],
+            &config,
+        )
+        .await,
+    )
+    .await;
+    let at = Utc::now();
+    let dns_sample = Uuid::new_v4();
+    let process_sample = Uuid::new_v4();
+    let port_sample = Uuid::new_v4();
+    let mut report = metric_report();
+    report.monitoring = Some(MonitoringData {
+        schema_version: 2,
+        session_id: Uuid::new_v4(),
+        sample_sequence: 1,
+        report_interval_secs: 5,
+        dns_checks: vec![DnsResult {
+            id: dns_id,
+            name: "DNS".into(),
+            sample_id: dns_sample,
+            config_revision: saved.revision,
+            scheduled_at: Some(at),
+            completed_at: Some(at),
+            checked_at: Some(at),
+            status: CheckStatus::Unavailable,
+            hostname: "example.com".into(),
+            record_type: "A".into(),
+            answers: vec![],
+            latency_ms: None,
+            error: Some("timeout".into()),
+            reason: None,
+        }],
+        process_checks: vec![ProcessResult {
+            id: process_id,
+            name: "worker".into(),
+            sample_id: process_sample,
+            config_revision: saved.revision,
+            scheduled_at: Some(at),
+            completed_at: Some(at),
+            checked_at: Some(at),
+            status: CheckStatus::Unavailable,
+            process_name: "worker".into(),
+            count: None,
+            expected_count: None,
+            error: Some("permission".into()),
+            reason: None,
+        }],
+        local_port_checks: vec![LocalPortResult {
+            id: port_id,
+            name: "HTTP".into(),
+            sample_id: port_sample,
+            config_revision: saved.revision,
+            scheduled_at: Some(at),
+            completed_at: Some(at),
+            checked_at: Some(at),
+            status: CheckStatus::Unavailable,
+            address: None,
+            port: 8080,
+            latency_ms: None,
+            error: Some("closed".into()),
+            reason: None,
+        }],
+        ..Default::default()
+    });
+    let id_text = id.to_string();
+    let headers = [
+        ("x-agent-id", id_text.as_str()),
+        ("authorization", "Bearer correct-secret"),
+    ];
+    assert_eq!(
+        send_serialized(
+            &context.app,
+            Method::POST,
+            "/api/v1/agent/metrics",
+            &headers,
+            &report
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    let connection = rusqlite::Connection::open(&context.database_path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM check_samples", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    for (section, subject) in [
+        ("dns", dns_id),
+        ("processes", process_id),
+        ("ports", port_id),
+    ] {
+        let points: Vec<MonitoringHistoryPoint> = response_json(
+            send_empty(
+                &context.app,
+                Method::GET,
+                &format!(
+                    "/api/v1/nodes/{id}/monitoring/history?section={section}&device={subject}"
+                ),
+                &[("cookie", &cookie)],
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            points.len(),
+            1,
+            "{section} history should be independently queryable"
+        );
+    }
+    let statistics: Value = response_json(
+        send_empty(
+            &context.app,
+            Method::GET,
+            &format!("/api/v1/nodes/{id}/checks/statistics?minutes=60&kind=dns"),
+            &[("cookie", &cookie)],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(statistics.as_array().map(Vec::len), Some(1));
+    assert_eq!(statistics[0]["failed"], 1);
+    report.monitoring.as_mut().unwrap().sample_sequence = 2;
+    report.monitoring.as_mut().unwrap().process_checks[0].error = Some("changed".into());
+    assert_eq!(
+        send_serialized(
+            &context.app,
+            Method::POST,
+            "/api/v1/agent/metrics",
+            &headers,
+            &report
         )
         .await
         .status(),

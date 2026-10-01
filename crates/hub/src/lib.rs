@@ -167,6 +167,10 @@ pub fn build_app(config: Config) -> anyhow::Result<(Router, AppState)> {
             "/api/v1/nodes/{id}/probes/statistics",
             get(probe_statistics),
         )
+        .route(
+            "/api/v1/nodes/{id}/checks/statistics",
+            get(check_statistics),
+        )
         .route("/api/v1/groups", get(groups).post(create_group))
         .route("/api/v1/groups/{id}", delete(delete_group))
         .route("/api/v1/alerts", get(alerts))
@@ -631,7 +635,18 @@ async fn monitoring_history(
 ) -> Result<Json<Vec<MonitoringHistoryPoint>>, AppError> {
     validate_history_minutes(query.minutes)?;
     if ![
-        "cpu", "memory", "disk", "network", "tcp", "agent", "services", "probes", "all",
+        "cpu",
+        "memory",
+        "disk",
+        "network",
+        "tcp",
+        "agent",
+        "services",
+        "probes",
+        "dns",
+        "processes",
+        "ports",
+        "all",
     ]
     .contains(&query.section.as_str())
         || query
@@ -677,6 +692,38 @@ async fn probe_statistics(
         .map_err(|error| AppError::Internal(error.into()))??
         .map(Json)
         .ok_or_else(|| AppError::not_found("node not found"))
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckStatisticsQuery {
+    #[serde(default = "default_history_minutes")]
+    minutes: u64,
+    kind: Option<String>,
+}
+
+async fn check_statistics(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<CheckStatisticsQuery>,
+) -> Result<Json<Vec<monitoring::CheckStatistics>>, AppError> {
+    validate_history_minutes(query.minutes)?;
+    if query
+        .kind
+        .as_deref()
+        .is_some_and(|kind| !matches!(kind, "dns" | "process" | "port"))
+    {
+        return Err(AppError::bad_request("invalid check statistics kind"));
+    }
+    tokio::task::spawn_blocking(move || {
+        state
+            .inner
+            .database
+            .check_statistics(id, query.minutes, query.kind.as_deref())
+    })
+    .await
+    .map_err(|error| AppError::Internal(error.into()))??
+    .map(Json)
+    .ok_or_else(|| AppError::not_found("node not found"))
 }
 
 async fn delete_node(

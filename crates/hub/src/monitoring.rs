@@ -1,18 +1,31 @@
 use std::collections::{BTreeMap, HashSet};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use pinglake_protocol::{
     CheckStatus, MetricReport, MetricStatus, MonitoringData, MonitoringHistoryPoint,
     NodeMonitoringConfig, ProbeKind, ProbeResult, ProbeStatistics, ProbeStatus,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{db::Database, error::AppError};
 
 const MAX_HISTORY_POINTS: usize = 240;
 pub(crate) const MAX_HISTORY_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckStatistics {
+    pub subject_id: String,
+    pub kind: String,
+    pub successful: u64,
+    pub failed: u64,
+    pub unknown: u64,
+    pub attempts: u64,
+    pub success_rate_percent: Option<f64>,
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("monitoring configuration revision changed: requested {requested}, current {current}")]
@@ -136,6 +149,17 @@ impl Database {
             .iter()
             .map(|result| result.config_revision)
             .chain(data.probes.iter().map(|result| result.config_revision))
+            .chain(data.dns_checks.iter().map(|result| result.config_revision))
+            .chain(
+                data.process_checks
+                    .iter()
+                    .map(|result| result.config_revision),
+            )
+            .chain(
+                data.local_port_checks
+                    .iter()
+                    .map(|result| result.config_revision),
+            )
         {
             if configs.contains_key(&revision) {
                 continue;
@@ -173,14 +197,90 @@ impl Database {
             }
             let previous: Option<String> = connection
                 .query_row(
-                    "SELECT result_json FROM probe_samples WHERE node_id = ?1 AND sample_id = ?2",
-                    params![node_id.to_string(), result.sample_id.to_string()],
+                    "SELECT result_json FROM probe_samples WHERE node_id = ?1 AND sample_id = ?2 AND config_revision = ?3",
+                    params![node_id.to_string(), result.sample_id.to_string(), i64::try_from(result.config_revision)?],
                     |row| row.get(0),
                 )
                 .optional()?;
             if previous.is_some_and(|previous| {
                 serde_json::to_string(result).is_ok_and(|value| value != previous)
             }) {
+                return Ok(false);
+            }
+            if sample_payload_conflicts(
+                &connection,
+                node_id,
+                "probe",
+                result.sample_id,
+                result.config_revision,
+                &serde_json::to_string(result)?,
+            )? {
+                return Ok(false);
+            }
+        }
+        for result in &data.dns_checks {
+            if !configs[&result.config_revision]
+                .dns_checks
+                .iter()
+                .any(|check| check.id == result.id && check.enabled && check.name == result.name)
+            {
+                return Ok(false);
+            }
+            if result.sample_id.is_nil() {
+                continue;
+            }
+            if sample_payload_conflicts(
+                &connection,
+                node_id,
+                "dns",
+                result.sample_id,
+                result.config_revision,
+                &serde_json::to_string(result)?,
+            )? {
+                return Ok(false);
+            }
+        }
+        for result in &data.process_checks {
+            if !configs[&result.config_revision]
+                .process_checks
+                .iter()
+                .any(|check| check.id == result.id && check.enabled && check.name == result.name)
+            {
+                return Ok(false);
+            }
+            if result.sample_id.is_nil() {
+                continue;
+            }
+            if sample_payload_conflicts(
+                &connection,
+                node_id,
+                "process",
+                result.sample_id,
+                result.config_revision,
+                &serde_json::to_string(result)?,
+            )? {
+                return Ok(false);
+            }
+        }
+        for result in &data.local_port_checks {
+            if !configs[&result.config_revision]
+                .local_port_checks
+                .iter()
+                .any(|check| check.id == result.id && check.enabled && check.name == result.name)
+            {
+                return Ok(false);
+            }
+            if result.sample_id.is_nil() {
+                continue;
+            }
+            if sample_payload_conflicts(
+                &connection,
+                node_id,
+                "port",
+                result.sample_id,
+                result.config_revision,
+                &serde_json::to_string(result)?,
+            )? {
                 return Ok(false);
             }
         }
@@ -232,37 +332,74 @@ impl Database {
                 monitoring,
             });
         }
-        // Event histories use deduplicated result tables so a time-bucketed host snapshot cannot hide a probe or service check.
-        if section == "probes" || section == "services" {
+        // Event histories use deduplicated result tables so a time-bucketed host snapshot cannot hide a check.
+        if matches!(
+            section,
+            "probes" | "services" | "dns" | "processes" | "ports"
+        ) {
             points.clear();
-            let (table, time_column, id_column) = if section == "probes" {
-                ("probe_samples", "scheduled_at", "target_id")
-            } else {
-                ("service_samples", "checked_at", "subject_id")
+            let (table, time_column, id_column, kind) = match section {
+                "probes" => ("check_samples", "scheduled_at", "subject_id", "probe"),
+                "services" => ("service_samples", "checked_at", "subject_id", "service"),
+                "dns" => (
+                    "check_samples",
+                    "COALESCE(scheduled_at, checked_at)",
+                    "subject_id",
+                    "dns",
+                ),
+                "processes" => (
+                    "check_samples",
+                    "COALESCE(scheduled_at, checked_at)",
+                    "subject_id",
+                    "process",
+                ),
+                "ports" => (
+                    "check_samples",
+                    "COALESCE(scheduled_at, checked_at)",
+                    "subject_id",
+                    "port",
+                ),
+                _ => unreachable!(),
             };
+            let kind_filter = if table == "check_samples" {
+                " AND kind = ?4"
+            } else {
+                ""
+            };
+            let limit_param = if table == "check_samples" { "?5" } else { "?4" };
             let query = format!(
                 "SELECT {time_column}, received_at, result_json FROM {table}
                 WHERE node_id = ?1 AND received_at >= ?2 AND (?3 IS NULL OR {id_column} = ?3)
-                ORDER BY received_at DESC LIMIT ?4"
+                {kind_filter} ORDER BY received_at DESC LIMIT {limit_param}"
             );
             let mut statement = connection.prepare(&query)?;
-            let rows = statement.query_map(
-                params![node_id.to_string(), cutoff, device, MAX_HISTORY_POINTS],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )?;
+            let node_text = node_id.to_string();
+            let rows = if table == "check_samples" {
+                statement.query_map(
+                    params![node_text, cutoff, device, kind, MAX_HISTORY_POINTS],
+                    map_history_row,
+                )?
+            } else {
+                statement.query_map(
+                    params![node_text, cutoff, device, MAX_HISTORY_POINTS],
+                    map_history_row,
+                )?
+            };
             for row in rows {
                 let (collected_at, received_at, json) = row?;
                 let mut monitoring = MonitoringData::default();
                 if section == "probes" {
                     monitoring.probes.push(serde_json::from_str(&json)?);
-                } else {
+                } else if section == "services" {
                     monitoring.services.push(serde_json::from_str(&json)?);
+                } else if section == "dns" {
+                    monitoring.dns_checks.push(serde_json::from_str(&json)?);
+                } else if section == "processes" {
+                    monitoring.process_checks.push(serde_json::from_str(&json)?);
+                } else {
+                    monitoring
+                        .local_port_checks
+                        .push(serde_json::from_str(&json)?);
                 }
                 points.push(MonitoringHistoryPoint {
                     collected_at: parse_time(collected_at)?,
@@ -299,7 +436,7 @@ impl Database {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut statement = connection.prepare("SELECT result_json FROM probe_samples WHERE node_id = ?1 AND scheduled_at >= ?2 AND scheduled_at <= ?3 ORDER BY scheduled_at")?;
+        let mut statement = connection.prepare("SELECT result_json FROM check_samples WHERE node_id = ?1 AND kind = 'probe' AND scheduled_at >= ?2 AND scheduled_at <= ?3 ORDER BY scheduled_at")?;
         let samples = statement
             .query_map(
                 params![node_id.to_string(), timestamp(start), timestamp(end)],
@@ -308,6 +445,69 @@ impl Database {
             .map(|row| Ok(serde_json::from_str::<ProbeResult>(&row?)?));
         Ok(Some(calculate_statistics(&configs, samples, start, end)?))
     }
+
+    pub fn check_statistics(
+        &self,
+        node_id: Uuid,
+        minutes: u64,
+        kind_filter: Option<&str>,
+    ) -> Result<Option<Vec<CheckStatistics>>> {
+        let connection = self.lock()?;
+        if !node_exists(&connection, node_id)? {
+            return Ok(None);
+        }
+        let cutoff = timestamp(Utc::now() - chrono::Duration::minutes(minutes as i64));
+        let mut statement = connection.prepare(
+            "SELECT subject_id, kind, result_json FROM check_samples
+             WHERE node_id=?1 AND received_at >= ?2 AND (?3 IS NULL OR kind=?3)
+             ORDER BY subject_id",
+        )?;
+        let mut stats = BTreeMap::<(String, String), CheckStatistics>::new();
+        let rows =
+            statement.query_map(params![node_id.to_string(), cutoff, kind_filter], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+        for row in rows {
+            let (subject_id, kind, result_json) = row?;
+            let value = serde_json::from_str::<serde_json::Value>(&result_json)?;
+            let status = value
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let entry =
+                stats
+                    .entry((subject_id.clone(), kind.clone()))
+                    .or_insert(CheckStatistics {
+                        subject_id,
+                        kind,
+                        successful: 0,
+                        failed: 0,
+                        unknown: 0,
+                        attempts: 0,
+                        success_rate_percent: None,
+                    });
+            entry.attempts += 1;
+            match status {
+                "ok" | "success" => entry.successful += 1,
+                "unavailable" | "failure" | "timeout" => entry.failed += 1,
+                _ => entry.unknown += 1,
+            }
+        }
+        let mut result = stats.into_values().collect::<Vec<_>>();
+        for item in &mut result {
+            item.success_rate_percent =
+                (item.attempts > 0).then(|| item.successful as f64 * 100.0 / item.attempts as f64);
+        }
+        Ok(Some(result))
+    }
+}
+
+fn map_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, String)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
 }
 
 fn node_exists(connection: &Connection, node_id: Uuid) -> Result<bool> {
@@ -321,6 +521,78 @@ fn node_exists(connection: &Connection, node_id: Uuid) -> Result<bool> {
         .is_some())
 }
 
+fn sample_payload_conflicts(
+    connection: &Connection,
+    node_id: Uuid,
+    kind: &str,
+    sample_id: Uuid,
+    config_revision: u64,
+    payload: &str,
+) -> Result<bool> {
+    let previous: Option<String> = connection
+        .query_row(
+            "SELECT result_json FROM check_samples
+             WHERE node_id=?1 AND kind=?2 AND sample_id=?3 AND config_revision=?4",
+            params![
+                node_id.to_string(),
+                kind,
+                sample_id.to_string(),
+                i64::try_from(config_revision)?
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(previous.is_some_and(|previous| previous != payload))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_check_sample(
+    transaction: &Transaction<'_>,
+    node_id: Uuid,
+    kind: &str,
+    subject_id: Uuid,
+    sample_id: Uuid,
+    config_revision: u64,
+    scheduled_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    checked_at: Option<DateTime<Utc>>,
+    received_at: DateTime<Utc>,
+    payload: &str,
+) -> Result<()> {
+    let payload_hash = format!("{:x}", Sha256::digest(payload.as_bytes()));
+    let existing: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT payload_hash, result_json FROM check_samples
+             WHERE node_id=?1 AND kind=?2 AND sample_id=?3 AND config_revision=?4",
+            params![
+                node_id.to_string(),
+                kind,
+                sample_id.to_string(),
+                i64::try_from(config_revision)?
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((hash, previous)) = existing {
+        if hash != payload_hash || previous != payload {
+            bail!("duplicate monitoring sample has a different payload");
+        }
+        return Ok(());
+    }
+    transaction.execute(
+        "INSERT INTO check_samples
+         (node_id,kind,subject_id,sample_id,config_revision,scheduled_at,completed_at,checked_at,received_at,payload_hash,result_json)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![
+            node_id.to_string(), kind, subject_id.to_string(), sample_id.to_string(),
+            i64::try_from(config_revision)?, scheduled_at.map(timestamp),
+            completed_at.map(timestamp), checked_at.map(timestamp),
+            timestamp(received_at), payload_hash, payload
+        ],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn insert_results(
     transaction: &Transaction<'_>,
     node_id: Uuid,
@@ -331,12 +603,80 @@ pub(crate) fn insert_results(
         return Ok(());
     };
     for probe in &data.probes {
+        let payload = serde_json::to_string(probe)?;
+        insert_check_sample(
+            transaction,
+            node_id,
+            "probe",
+            probe.target_id,
+            probe.sample_id,
+            probe.config_revision,
+            Some(probe.scheduled_at),
+            Some(probe.completed_at),
+            None,
+            received_at,
+            &payload,
+        )?;
         transaction.execute("INSERT OR IGNORE INTO probe_samples(node_id, sample_id, target_id, config_revision, scheduled_at, received_at, result_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![node_id.to_string(), probe.sample_id.to_string(), probe.target_id.to_string(), i64::try_from(probe.config_revision)?, timestamp(probe.scheduled_at), timestamp(received_at), serde_json::to_string(probe)?])?;
+            params![node_id.to_string(), probe.sample_id.to_string(), probe.target_id.to_string(), i64::try_from(probe.config_revision)?, timestamp(probe.scheduled_at), timestamp(received_at), payload])?;
     }
     for service in &data.services {
         transaction.execute("INSERT OR IGNORE INTO service_samples(node_id, subject_id, config_revision, checked_at, received_at, result_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
             params![node_id.to_string(), service.id.to_string(), i64::try_from(service.config_revision)?, timestamp(service.checked_at), timestamp(received_at), serde_json::to_string(service)?])?;
+    }
+    for check in &data.dns_checks {
+        if !check.sample_id.is_nil() {
+            let payload = serde_json::to_string(check)?;
+            insert_check_sample(
+                transaction,
+                node_id,
+                "dns",
+                check.id,
+                check.sample_id,
+                check.config_revision,
+                check.scheduled_at,
+                check.completed_at,
+                check.checked_at,
+                received_at,
+                &payload,
+            )?;
+        }
+    }
+    for check in &data.process_checks {
+        if !check.sample_id.is_nil() {
+            let payload = serde_json::to_string(check)?;
+            insert_check_sample(
+                transaction,
+                node_id,
+                "process",
+                check.id,
+                check.sample_id,
+                check.config_revision,
+                check.scheduled_at,
+                check.completed_at,
+                check.checked_at,
+                received_at,
+                &payload,
+            )?;
+        }
+    }
+    for check in &data.local_port_checks {
+        if !check.sample_id.is_nil() {
+            let payload = serde_json::to_string(check)?;
+            insert_check_sample(
+                transaction,
+                node_id,
+                "port",
+                check.id,
+                check.sample_id,
+                check.config_revision,
+                check.scheduled_at,
+                check.completed_at,
+                check.checked_at,
+                received_at,
+                &payload,
+            )?;
+        }
     }
     Ok(())
 }
@@ -353,6 +693,12 @@ fn select_section(data: &mut MonitoringData, section: &str, device: Option<&str>
             .retain(|service| service.id.to_string() == device);
         data.probes
             .retain(|probe| probe.target_id.to_string() == device);
+        data.dns_checks
+            .retain(|check| check.id.to_string() == device);
+        data.process_checks
+            .retain(|check| check.id.to_string() == device);
+        data.local_port_checks
+            .retain(|check| check.id.to_string() == device);
     }
     if section == "all" {
         return;
@@ -382,6 +728,15 @@ fn select_section(data: &mut MonitoringData, section: &str, device: Option<&str>
     }
     if section != "probes" {
         data.probes.clear();
+    }
+    if section != "dns" {
+        data.dns_checks.clear();
+    }
+    if section != "processes" {
+        data.process_checks.clear();
+    }
+    if section != "ports" {
+        data.local_port_checks.clear();
     }
 }
 
@@ -1008,10 +1363,12 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
             bounded_error(error)?;
         }
     }
+    let mut extension_sample_ids = HashSet::new();
     for check in &data.dns_checks {
         if check.id.is_nil()
             || (require_v2_identity
                 && (check.sample_id.is_nil()
+                    || !extension_sample_ids.insert(check.sample_id)
                     || check.config_revision > i64::MAX as u64
                     || check.scheduled_at.is_none()
                     || check.completed_at.is_none()))
@@ -1049,6 +1406,7 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         if check.id.is_nil()
             || (require_v2_identity
                 && (check.sample_id.is_nil()
+                    || !extension_sample_ids.insert(check.sample_id)
                     || check.config_revision > i64::MAX as u64
                     || check.scheduled_at.is_none()
                     || check.completed_at.is_none()))
@@ -1084,6 +1442,7 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
             || check.port == 0
             || (require_v2_identity
                 && (check.sample_id.is_nil()
+                    || !extension_sample_ids.insert(check.sample_id)
                     || check.config_revision > i64::MAX as u64
                     || check.scheduled_at.is_none()
                     || check.completed_at.is_none()))
