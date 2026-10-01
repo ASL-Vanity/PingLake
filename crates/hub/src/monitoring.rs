@@ -702,7 +702,6 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
             bounded(address, 128, false)?;
         }
     }
-    ids.clear();
     for probe in &config.probes {
         if probe.id.is_nil() || !ids.insert(probe.id) {
             return Err(invalid("probe IDs must be non-nil and unique"));
@@ -960,6 +959,7 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
     let now = Utc::now();
     let earliest = now - chrono::Duration::days(7);
     let latest = now + chrono::Duration::minutes(5);
+    let require_v2_identity = data.schema_version >= 2;
     for service in &data.services {
         if service.id.is_nil() || service.config_revision > i64::MAX as u64 {
             return Err(invalid("invalid service identity or revision"));
@@ -1009,7 +1009,13 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         }
     }
     for check in &data.dns_checks {
-        if check.id.is_nil() {
+        if check.id.is_nil()
+            || (require_v2_identity
+                && (check.sample_id.is_nil()
+                    || check.config_revision > i64::MAX as u64
+                    || check.scheduled_at.is_none()
+                    || check.completed_at.is_none()))
+        {
             return Err(invalid("invalid DNS check identity"));
         }
         bounded(&check.name, 128, false)?;
@@ -1020,6 +1026,15 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
             && (checked_at < earliest || checked_at > latest)
         {
             return Err(invalid("DNS check time outside accepted window"));
+        }
+        if let (Some(scheduled), Some(completed)) = (check.scheduled_at, check.completed_at) {
+            if scheduled < earliest
+                || scheduled > latest
+                || completed < scheduled
+                || completed > latest
+            {
+                return Err(invalid("DNS check timestamps outside accepted window"));
+            }
         }
         if check.status == CheckStatus::Ok && check.latency_ms.is_none() {
             return Err(invalid("successful DNS check needs a latency"));
@@ -1032,7 +1047,13 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         }
     }
     for check in &data.process_checks {
-        if check.id.is_nil() {
+        if check.id.is_nil()
+            || (require_v2_identity
+                && (check.sample_id.is_nil()
+                    || check.config_revision > i64::MAX as u64
+                    || check.scheduled_at.is_none()
+                    || check.completed_at.is_none()))
+        {
             return Err(invalid("invalid process check identity"));
         }
         bounded(&check.name, 256, false)?;
@@ -1041,6 +1062,15 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
             && (checked_at < earliest || checked_at > latest)
         {
             return Err(invalid("process check time outside accepted window"));
+        }
+        if let (Some(scheduled), Some(completed)) = (check.scheduled_at, check.completed_at) {
+            if scheduled < earliest
+                || scheduled > latest
+                || completed < scheduled
+                || completed > latest
+            {
+                return Err(invalid("process check timestamps outside accepted window"));
+            }
         }
         if let Some(error) = &check.error {
             bounded_error(error)?;
@@ -1052,7 +1082,14 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         }
     }
     for check in &data.local_port_checks {
-        if check.id.is_nil() || check.port == 0 {
+        if check.id.is_nil()
+            || check.port == 0
+            || (require_v2_identity
+                && (check.sample_id.is_nil()
+                    || check.config_revision > i64::MAX as u64
+                    || check.scheduled_at.is_none()
+                    || check.completed_at.is_none()))
+        {
             return Err(invalid("invalid local port check identity or port"));
         }
         bounded(&check.name, 128, false)?;
@@ -1064,6 +1101,17 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
             && (checked_at < earliest || checked_at > latest)
         {
             return Err(invalid("local port check time outside accepted window"));
+        }
+        if let (Some(scheduled), Some(completed)) = (check.scheduled_at, check.completed_at) {
+            if scheduled < earliest
+                || scheduled > latest
+                || completed < scheduled
+                || completed > latest
+            {
+                return Err(invalid(
+                    "local port check timestamps outside accepted window",
+                ));
+            }
         }
         if let Some(error) = &check.error {
             bounded_error(error)?;

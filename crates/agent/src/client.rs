@@ -103,6 +103,7 @@ impl ApiClient {
             .get(self.config_url.clone())
             .header("X-Agent-ID", agent_id.to_string())
             .bearer_auth(agent_secret)
+            .header("X-Monitoring-Schema-Max", "2")
             .send()
             .await
             .map_err(transport_error)?;

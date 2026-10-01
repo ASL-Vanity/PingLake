@@ -10,16 +10,16 @@ mod state;
 #[cfg(target_os = "windows")]
 pub mod windows_service;
 
-use std::time::Duration;
 #[cfg(test)]
 use std::time::Instant;
+use std::{path::PathBuf, time::Duration};
 
 #[cfg(target_os = "windows")]
 use std::fs::{self, File, OpenOptions};
 #[cfg(target_os = "windows")]
 use std::io::{self, Write};
 #[cfg(target_os = "windows")]
-use std::path::{Path, PathBuf};
+use std::path::Path;
 #[cfg(target_os = "windows")]
 use std::sync::Mutex;
 
@@ -67,12 +67,14 @@ struct PreparedAgent {
     collector: MetricCollector,
     enroll_request: EnrollRequest,
     configured_interval_secs: Option<u64>,
+    queue_path: PathBuf,
     probe_policy: probes::ProbePolicy,
     latency_endpoint: Option<(std::net::SocketAddr, String)>,
 }
 
 impl PreparedAgent {
     fn new(settings: Settings, state_store: StateStore) -> Result<Self> {
+        let queue_path = state_store.directory().join("pending-reports.json");
         let probe_policy = probes::ProbePolicy {
             allow_private: settings.allow_private_probe_targets,
             allow_loopback: settings.allow_loopback_probe_targets,
@@ -119,6 +121,7 @@ impl PreparedAgent {
             collector,
             enroll_request,
             configured_interval_secs: settings.interval_secs,
+            queue_path,
             probe_policy,
             latency_endpoint,
         })
@@ -171,6 +174,8 @@ impl PreparedAgent {
             self.state,
             self.collector,
             interval_secs,
+            enroll_response.monitoring_schema_max,
+            self.queue_path,
             self.probe_policy,
             self.latency_endpoint,
             shutdown,

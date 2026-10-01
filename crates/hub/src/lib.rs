@@ -357,6 +357,7 @@ async fn enroll(
         EnrollResult::Created | EnrollResult::Updated => Ok(Json(EnrollResponse {
             accepted: true,
             report_interval_secs: DEFAULT_REPORT_INTERVAL_SECS,
+            monitoring_schema_max: 2,
         })),
         EnrollResult::SecretMismatch => Err(AppError::conflict("agent ID is already registered")),
         EnrollResult::EnrollmentTokenRequired => Err(AppError::unauthorized()),
@@ -585,12 +586,32 @@ async fn agent_monitoring_config(
         .and_then(|value| Uuid::parse_str(value).ok())
         .ok_or_else(AppError::unauthorized)?;
     let secret = bearer_secret(&headers).ok_or_else(AppError::unauthorized)?;
-    state
+    let schema_max = headers
+        .get("x-monitoring-schema-max")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1);
+    let config = state
         .inner
         .database
         .agent_monitoring_config(id, &hash_hex(secret.as_bytes()))?
-        .map(Json)
-        .ok_or_else(AppError::unauthorized)
+        .ok_or_else(AppError::unauthorized)?;
+    if schema_max < 2 {
+        let mut legacy = config;
+        legacy.dns_checks.clear();
+        legacy.process_checks.clear();
+        legacy.local_port_checks.clear();
+        legacy.probes.retain(|probe| {
+            matches!(
+                probe.kind,
+                pinglake_protocol::ProbeKind::Icmp
+                    | pinglake_protocol::ProbeKind::Tcp
+                    | pinglake_protocol::ProbeKind::Http
+            )
+        });
+        return Ok(Json(legacy));
+    }
+    Ok(Json(config))
 }
 
 fn validate_history_minutes(minutes: u64) -> Result<(), AppError> {

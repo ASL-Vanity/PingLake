@@ -25,6 +25,14 @@ pub struct EnrollRequest {
 pub struct EnrollResponse {
     pub accepted: bool,
     pub report_interval_secs: u64,
+    /// The highest monitoring report schema understood by this Hub. Older
+    /// Hubs omit the field, so new Agents must treat the default as v1.
+    #[serde(default = "default_monitoring_schema_max")]
+    pub monitoring_schema_max: u32,
+}
+
+fn default_monitoring_schema_max() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,4 +232,16 @@ pub enum LiveEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiError {
     pub error: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EnrollResponse;
+
+    #[test]
+    fn legacy_enrollment_response_defaults_to_v1_monitoring() {
+        let response: EnrollResponse =
+            serde_json::from_str(r#"{"accepted":true,"report_interval_secs":5}"#).unwrap();
+        assert_eq!(response.monitoring_schema_max, 1);
+    }
 }

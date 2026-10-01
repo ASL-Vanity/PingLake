@@ -6,20 +6,34 @@
   "dns_checks": [{
     "id": "00000000-0000-0000-0000-000000000002",
     "name": "public-dns",
+    "sample_id": "00000000-0000-0000-0000-000000000012",
+    "config_revision": 4,
+    "scheduled_at": "2026-10-01T00:00:00Z",
+    "completed_at": "2026-10-01T00:00:00Z",
     "hostname": "example.test",
     "record_type": "A",
     "status": "ok",
+    "latency_ms": 1.2,
     "answers": ["192.0.2.1"]
   }],
   "process_checks": [{
     "id": "00000000-0000-0000-0000-000000000003",
     "name": "worker",
+    "sample_id": "00000000-0000-0000-0000-000000000013",
+    "config_revision": 4,
+    "scheduled_at": "2026-10-01T00:00:00Z",
+    "completed_at": "2026-10-01T00:00:00Z",
     "process_name": "worker",
-    "status": "permission_denied"
+    "status": "permission_denied",
+    "error": "permission denied"
   }],
   "local_port_checks": [{
     "id": "00000000-0000-0000-0000-000000000004",
     "name": "local-http",
+    "sample_id": "00000000-0000-0000-0000-000000000014",
+    "config_revision": 4,
+    "scheduled_at": "2026-10-01T00:00:00Z",
+    "completed_at": "2026-10-01T00:00:00Z",
     "port": 8080,
     "status": "unavailable"
   }]

@@ -115,7 +115,6 @@ impl StateStore {
         }
     }
 
-    #[cfg(target_os = "windows")]
     pub(crate) fn directory(&self) -> &Path {
         &self.directory
     }

@@ -654,7 +654,7 @@ fn apply_monitoring_alerts(
     settings: &AlertSettings,
     now: DateTime<Utc>,
 ) -> Result<Vec<AlertRecord>> {
-    use pinglake_protocol::{MetricStatus, ProbeStatus};
+    use pinglake_protocol::{CheckStatus, MetricStatus, ProbeStatus};
     let Some(data) = &report.monitoring else {
         return Ok(Vec::new());
     };
@@ -683,6 +683,107 @@ fn apply_monitoring_alerts(
             format!(
                 "Service {} is {} (expected {})",
                 target.name, service.state, target.expected_state
+            ),
+        ));
+    }
+    for process in &data.process_checks {
+        if process.config_revision != config.revision {
+            continue;
+        }
+        let Some(target) = config
+            .process_checks
+            .iter()
+            .find(|check| check.id == process.id && check.enabled)
+        else {
+            continue;
+        };
+        let healthy = if process.status == CheckStatus::Ok {
+            let running = process.count.unwrap_or(0) > 0;
+            Some(if let Some(expected) = target.expected_count {
+                process.count == Some(expected)
+            } else if target.expects_running() {
+                running
+            } else {
+                !running
+            })
+        } else {
+            None
+        };
+        checks.push((
+            AlertKind::Service,
+            process.id,
+            healthy,
+            process
+                .scheduled_at
+                .or(process.checked_at)
+                .unwrap_or(report.collected_at),
+            target.interval_secs,
+            format!(
+                "Process {} is {} (expected {})",
+                target.name,
+                process.count.unwrap_or(0),
+                target.expected_state
+            ),
+        ));
+    }
+    for dns in &data.dns_checks {
+        if dns.config_revision != config.revision {
+            continue;
+        }
+        let Some(target) = config
+            .dns_checks
+            .iter()
+            .find(|check| check.id == dns.id && check.enabled)
+        else {
+            continue;
+        };
+        let healthy = (dns.status == CheckStatus::Ok).then_some(
+            target
+                .expected_value
+                .as_ref()
+                .map(|expected| dns.answers.iter().any(|answer| answer == expected))
+                .unwrap_or(true),
+        );
+        checks.push((
+            AlertKind::Probe,
+            dns.id,
+            healthy,
+            dns.scheduled_at
+                .or(dns.checked_at)
+                .unwrap_or(report.collected_at),
+            target.interval_secs,
+            format!(
+                "DNS check {} failed: {}",
+                target.name,
+                dns.error.as_deref().unwrap_or("DNS result did not match")
+            ),
+        ));
+    }
+    for port in &data.local_port_checks {
+        if port.config_revision != config.revision {
+            continue;
+        }
+        let Some(target) = config
+            .local_port_checks
+            .iter()
+            .find(|check| check.id == port.id && check.enabled)
+        else {
+            continue;
+        };
+        let healthy = (port.status == CheckStatus::Ok).then_some(port.error.is_none());
+        checks.push((
+            AlertKind::Probe,
+            port.id,
+            healthy,
+            port.scheduled_at
+                .or(port.checked_at)
+                .unwrap_or(report.collected_at),
+            target.interval_secs,
+            format!(
+                "Local port {}:{} failed: {}",
+                target.address.as_deref().unwrap_or("local"),
+                target.port,
+                port.error.as_deref().unwrap_or("port is not listening")
             ),
         ));
     }

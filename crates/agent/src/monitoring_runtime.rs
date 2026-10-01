@@ -1,17 +1,20 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    fs,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use anyhow::{Result, bail};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use pinglake_protocol::{
     AgentHealth, Capability, CheckStatus, DnsResult, LocalPortResult, MetricReport, MetricStatus,
     MonitoringData, NodeMonitoringConfig, ProbeKind, ProbeResult, ProbeTarget, ProcessResult,
     ServiceResult,
 };
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use tokio::{sync::Notify, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -27,10 +30,85 @@ const QUEUE_CAPACITY: usize = 64;
 // Reserve room for sample_age_ms to grow while the report waits for upload.
 const MAX_REPORT_BYTES: usize = 256 * 1024 - 1024;
 const MAX_SAMPLE_AGE: Duration = Duration::from_secs(300);
+const MAX_QUEUE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
+#[derive(Clone)]
 struct QueuedReport {
     report: MetricReport,
     collected: Instant,
+    queued_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedReport {
+    report: MetricReport,
+    queued_at: DateTime<Utc>,
+}
+
+fn load_queue(path: &Path) -> Result<VecDeque<QueuedReport>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(VecDeque::new());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.len() > MAX_QUEUE_FILE_BYTES {
+        bail!("pending report queue exceeds the supported size");
+    }
+    let bytes = fs::read(path)?;
+    let persisted: Vec<PersistedReport> = serde_json::from_slice(&bytes)
+        .map_err(|error| anyhow::anyhow!("pending report queue is invalid: {error}"))?;
+    let now = Utc::now();
+    let mut queue = VecDeque::new();
+    for item in persisted.into_iter().rev().take(QUEUE_CAPACITY).rev() {
+        let age = now
+            .signed_duration_since(item.queued_at)
+            .to_std()
+            .unwrap_or_default();
+        queue.push_back(QueuedReport {
+            report: item.report,
+            collected: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
+            queued_at: item.queued_at,
+        });
+    }
+    Ok(queue)
+}
+
+fn persist_queue(path: &Path, shared: &Shared, persist_lock: &Arc<Mutex<()>>) -> Result<()> {
+    let _persist_guard = persist_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("pending report queue lock is poisoned"))?;
+    let mut records = shared
+        .queue
+        .iter()
+        .map(|item| PersistedReport {
+            report: item.report.clone(),
+            queued_at: item.queued_at,
+        })
+        .collect::<Vec<_>>();
+    if let Some(item) = &shared.in_flight {
+        records.push(PersistedReport {
+            report: item.report.clone(),
+            queued_at: item.queued_at,
+        });
+    }
+    if records.is_empty() {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec(&records)?;
+    if bytes.len() as u64 > MAX_QUEUE_FILE_BYTES {
+        bail!("pending report queue exceeds the supported size");
+    }
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, bytes)?;
+    fs::rename(temporary, path)?;
+    Ok(())
 }
 
 #[derive(Default)]
@@ -38,6 +116,7 @@ struct Shared {
     health: AgentHealth,
     outcomes: VecDeque<bool>,
     queue: VecDeque<QueuedReport>,
+    in_flight: Option<QueuedReport>,
     config: NodeMonitoringConfig,
     services: Vec<ServiceResult>,
     probes: VecDeque<ProbeResult>,
@@ -50,7 +129,11 @@ impl Shared {
             self.queue.pop_front();
             self.health.dropped_reports += 1;
         }
-        self.queue.push_back(QueuedReport { report, collected });
+        self.queue.push_back(QueuedReport {
+            report,
+            collected,
+            queued_at: Utc::now(),
+        });
         self.health.queue_length = self.queue.len();
     }
 
@@ -86,11 +169,22 @@ pub async fn run(
     state: AgentState,
     collector: MetricCollector,
     interval: u64,
+    monitoring_schema_max: u32,
+    queue_path: PathBuf,
     policy: ProbePolicy,
     endpoint: Option<(std::net::SocketAddr, String)>,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let shared = Arc::new(Mutex::new(Shared::default()));
+    let mut initial = Shared::default();
+    match load_queue(&queue_path) {
+        Ok(queue) => {
+            initial.queue = queue;
+            initial.health.queue_length = initial.queue.len();
+        }
+        Err(error) => tracing::warn!(reason = %error, "pending report queue could not be restored"),
+    }
+    let shared = Arc::new(Mutex::new(initial));
+    let persist_lock = Arc::new(Mutex::new(()));
     let changed = Arc::new(Notify::new());
     let endpoint_shared = shared.clone();
     let endpoint_loop = async {
@@ -120,6 +214,9 @@ pub async fn run(
         collect_loop(
             collector,
             interval,
+            monitoring_schema_max,
+            queue_path.clone(),
+            persist_lock.clone(),
             shared.clone(),
             changed.clone(),
             shutdown.clone()
@@ -129,6 +226,8 @@ pub async fn run(
             state.clone(),
             shared.clone(),
             changed,
+            queue_path,
+            persist_lock,
             shutdown.clone()
         ),
         config_loop(client, state, shared.clone(), shutdown.clone()),
@@ -142,6 +241,9 @@ pub async fn run(
 async fn collect_loop(
     mut collector: MetricCollector,
     interval: u64,
+    monitoring_schema_max: u32,
+    queue_path: PathBuf,
+    persist_lock: Arc<Mutex<()>>,
     shared: Arc<Mutex<Shared>>,
     changed: Arc<Notify>,
     shutdown: CancellationToken,
@@ -171,7 +273,7 @@ async fn collect_loop(
         let data = report
             .monitoring
             .get_or_insert_with(MonitoringData::default);
-        data.schema_version = 2;
+        data.schema_version = if monitoring_schema_max >= 2 { 2 } else { 1 };
         data.session_id = session_id;
         data.sample_sequence = sequence;
         data.report_interval_secs = interval;
@@ -185,6 +287,10 @@ async fn collect_loop(
             .map(|probe| DnsResult {
                 id: probe.target_id,
                 name: probe.target_id.to_string(),
+                sample_id: probe.sample_id,
+                config_revision: probe.config_revision,
+                scheduled_at: Some(probe.scheduled_at),
+                completed_at: Some(probe.completed_at),
                 checked_at: Some(probe.completed_at),
                 status: CheckStatus::from(probe.status.clone()),
                 hostname: shared
@@ -193,11 +299,26 @@ async fn collect_loop(
                     .iter()
                     .find(|target| target.id == probe.target_id)
                     .map(|target| target.target.clone())
+                    .or_else(|| {
+                        shared
+                            .config
+                            .dns_checks
+                            .iter()
+                            .find(|target| target.id == probe.target_id)
+                            .map(|target| target.hostname.clone())
+                    })
                     .unwrap_or_default(),
-                record_type: "A/AAAA".into(),
+                record_type: shared
+                    .config
+                    .dns_checks
+                    .iter()
+                    .find(|target| target.id == probe.target_id)
+                    .map(|target| target.record_type.clone())
+                    .unwrap_or_else(|| "A/AAAA".into()),
                 answers: Vec::new(),
                 latency_ms: probe.latency_ms,
                 error: probe.error.clone(),
+                reason: probe.error.clone(),
             })
             .collect();
         let process_ids = shared
@@ -213,6 +334,10 @@ async fn collect_loop(
             .map(|service| ProcessResult {
                 id: service.id,
                 name: service.name.clone(),
+                sample_id: Uuid::new_v4(),
+                config_revision: service.config_revision,
+                scheduled_at: Some(service.checked_at),
+                completed_at: Some(service.checked_at),
                 checked_at: Some(service.checked_at),
                 status: match service.status {
                     MetricStatus::Ok => CheckStatus::Ok,
@@ -237,6 +362,7 @@ async fn collect_loop(
                     .find(|check| check.id == service.id)
                     .and_then(|check| check.expected_count),
                 error: service.error.clone(),
+                reason: service.error.clone(),
             })
             .collect();
         data.local_port_checks = shared
@@ -249,6 +375,10 @@ async fn collect_loop(
                 LocalPortResult {
                     id: check.id,
                     name: check.name.clone(),
+                    sample_id: Uuid::new_v4(),
+                    config_revision: shared.config.revision,
+                    scheduled_at: Some(report.collected_at),
+                    completed_at: Some(report.collected_at),
                     checked_at: Some(report.collected_at),
                     status: CheckStatus::Ok,
                     address: check.address.clone(),
@@ -259,15 +389,37 @@ async fn collect_loop(
                     } else {
                         Some("port is not listening".into())
                     },
+                    reason: if listening {
+                        None
+                    } else {
+                        Some("not_listening".into())
+                    },
                 }
             })
             .collect();
+        if data.schema_version < 2 {
+            downgrade_monitoring_to_v1(data);
+        }
         data.capabilities
             .insert("browser_endpoint".into(), shared.endpoint.clone());
         fit_report_budget(&mut report)?;
         shared.push(report, started);
+        persist_queue(&queue_path, &shared, &persist_lock)?;
         changed.notify_one();
     }
+}
+
+fn downgrade_monitoring_to_v1(data: &mut MonitoringData) {
+    data.schema_version = 1;
+    data.probes.retain(|probe| {
+        matches!(
+            probe.kind,
+            ProbeKind::Icmp | ProbeKind::Tcp | ProbeKind::Http
+        )
+    });
+    data.dns_checks.clear();
+    data.process_checks.clear();
+    data.local_port_checks.clear();
 }
 
 async fn send_loop(
@@ -275,6 +427,8 @@ async fn send_loop(
     state: AgentState,
     shared: Arc<Mutex<Shared>>,
     changed: Arc<Notify>,
+    queue_path: PathBuf,
+    persist_lock: Arc<Mutex<()>>,
     shutdown: CancellationToken,
 ) -> Result<()> {
     loop {
@@ -283,7 +437,9 @@ async fn send_loop(
         let next = {
             let mut shared = shared.lock().unwrap();
             let next = shared.queue.pop_front();
+            shared.in_flight = next.clone();
             shared.health.queue_length = shared.queue.len();
+            persist_queue(&queue_path, &shared, &persist_lock)?;
             next
         };
         let Some(mut next) = next else {
@@ -294,7 +450,10 @@ async fn send_loop(
         let mut retry = false;
         loop {
             if next.collected.elapsed() > MAX_SAMPLE_AGE {
-                shared.lock().unwrap().drop_report();
+                let mut shared = shared.lock().unwrap();
+                shared.in_flight = None;
+                shared.drop_report();
+                persist_queue(&queue_path, &shared, &persist_lock)?;
                 break;
             }
             if let Some(data) = &mut next.report.monitoring {
@@ -306,7 +465,10 @@ async fn send_loop(
             let started = Instant::now();
             let result = tokio::select! {
                 _ = shutdown.cancelled() => {
-                    shared.lock().unwrap().push(next.report.clone(), next.collected);
+                    let mut shared = shared.lock().unwrap();
+                    shared.in_flight = None;
+                    shared.push(next.report.clone(), next.collected);
+                    persist_queue(&queue_path, &shared, &persist_lock)?;
                     return Ok(())
                 },
                 result = client.send_metrics(state.agent_id, &state.agent_secret, &next.report) => result,
@@ -317,7 +479,12 @@ async fn send_loop(
                 result.as_ref().err().map(ToString::to_string),
             );
             match result {
-                Ok(()) => break,
+                Ok(()) => {
+                    let mut shared = shared.lock().unwrap();
+                    shared.in_flight = None;
+                    persist_queue(&queue_path, &shared, &persist_lock)?;
+                    break;
+                }
                 Err(SendError::Unauthorized) => {
                     bail!("agent authentication was rejected by the hub")
                 }
@@ -330,7 +497,10 @@ async fn send_loop(
             let delay = retry_delay(backoff);
             tokio::select! {
                 _ = shutdown.cancelled() => {
-                    shared.lock().unwrap().push(next.report.clone(), next.collected);
+                    let mut shared = shared.lock().unwrap();
+                    shared.in_flight = None;
+                    shared.push(next.report.clone(), next.collected);
+                    persist_queue(&queue_path, &shared, &persist_lock)?;
                     return Ok(())
                 }
                 _ = tokio::time::sleep(delay) => {}
@@ -421,7 +591,6 @@ fn validate_config(config: &NodeMonitoringConfig) -> Result<()> {
             bail!("invalid local port check configuration");
         }
     }
-    ids.clear();
     for probe in &config.probes {
         if !ids.insert(probe.id) {
             bail!("duplicate probe ID");
@@ -535,8 +704,26 @@ fn due_probes(
     origin: Instant,
     now: Instant,
 ) -> Vec<ProbeTarget> {
-    let mut due = config
-        .probes
+    let mut configured = config.probes.clone();
+    configured.extend(
+        config
+            .dns_checks
+            .iter()
+            .filter(|check| check.enabled)
+            .map(|check| ProbeTarget {
+                id: check.id,
+                name: check.name.clone(),
+                kind: ProbeKind::Dns,
+                target: check.hostname.clone(),
+                port: None,
+                enabled: true,
+                interval_secs: check.interval_secs,
+                timeout_ms: check.timeout_ms,
+                expected_status: None,
+                response_contains: None,
+            }),
+    );
+    let mut due = configured
         .iter()
         .filter(|target| {
             target.enabled
@@ -615,6 +802,32 @@ mod tests {
                 .unwrap()
                 .sample_sequence,
             7
+        );
+    }
+
+    #[test]
+    fn pending_queue_survives_a_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pending-reports.json");
+        let lock = Arc::new(Mutex::new(()));
+        let mut shared = Shared::default();
+        let mut report = MetricCollector::new().collect();
+        report.monitoring.as_mut().unwrap().sample_sequence = 17;
+        shared.push(report, Instant::now());
+        persist_queue(&path, &shared, &lock).unwrap();
+
+        let restored = load_queue(&path).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            restored
+                .front()
+                .unwrap()
+                .report
+                .monitoring
+                .as_ref()
+                .unwrap()
+                .sample_sequence,
+            17
         );
     }
     #[test]
@@ -728,6 +941,8 @@ mod tests {
             axum::serve(hub_listener, app).await.unwrap();
         });
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let queue_dir = tempfile::tempdir().unwrap();
+        let queue_path = queue_dir.path().join("pending-reports.json");
         let shutdown = CancellationToken::new();
         let worker = tokio::spawn(run(
             client,
@@ -738,6 +953,8 @@ mod tests {
             },
             MetricCollector::new(),
             1,
+            2,
+            queue_path,
             ProbePolicy::default(),
             Some((
                 occupied.local_addr().unwrap(),
@@ -758,6 +975,9 @@ mod tests {
     async fn collection_continues_when_uploads_fail() {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let changed = Arc::new(Notify::new());
+        let queue_dir = tempfile::tempdir().unwrap();
+        let queue_path = queue_dir.path().join("pending-reports.json");
+        let persist_lock = Arc::new(Mutex::new(()));
         let shutdown = CancellationToken::new();
         let client = ApiClient::new(url::Url::parse("http://127.0.0.1:9").unwrap(), false).unwrap();
         let state = AgentState {
@@ -768,6 +988,9 @@ mod tests {
         let collect = tokio::spawn(collect_loop(
             MetricCollector::new(),
             1,
+            2,
+            queue_path.clone(),
+            persist_lock.clone(),
             shared.clone(),
             changed.clone(),
             shutdown.clone(),
@@ -777,6 +1000,8 @@ mod tests {
             state,
             shared.clone(),
             changed,
+            queue_path,
+            persist_lock,
             shutdown.clone(),
         ));
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);

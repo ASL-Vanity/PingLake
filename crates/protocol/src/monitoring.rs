@@ -192,7 +192,7 @@ pub struct MonitoringData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ServiceCheck {
     pub id: Uuid,
     pub name: String,
@@ -216,7 +216,7 @@ impl Default for ServiceCheck {
 /// A DNS lookup check. `record_type` is intentionally a string so Agents can
 /// add record types without making old Hub binaries reject the configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DnsCheck {
     pub id: Uuid,
     pub name: String,
@@ -233,6 +233,14 @@ pub struct DnsCheck {
 pub struct DnsResult {
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
+    pub sample_id: Uuid,
+    #[serde(default)]
+    pub config_revision: u64,
+    #[serde(default)]
+    pub scheduled_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
     pub checked_at: Option<DateTime<Utc>>,
     pub status: CheckStatus,
     pub hostname: String,
@@ -240,13 +248,15 @@ pub struct DnsResult {
     pub answers: Vec<String>,
     pub latency_ms: Option<f64>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// A process existence/health check, identified by a stable process name or
 /// executable pattern. The protocol does not prescribe how an Agent locates
 /// processes on a platform.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ProcessCheck {
     pub id: Uuid,
     pub name: String,
@@ -269,18 +279,28 @@ impl ProcessCheck {
 pub struct ProcessResult {
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
+    pub sample_id: Uuid,
+    #[serde(default)]
+    pub config_revision: u64,
+    #[serde(default)]
+    pub scheduled_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
     pub checked_at: Option<DateTime<Utc>>,
     pub status: CheckStatus,
     pub process_name: String,
     pub count: Option<u32>,
     pub expected_count: Option<u32>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// A local listening-port check. `address` defaults to loopback semantics at
 /// the Agent and is carried explicitly when a platform exposes a bind address.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LocalPortCheck {
     pub id: Uuid,
     pub name: String,
@@ -296,12 +316,22 @@ pub struct LocalPortCheck {
 pub struct LocalPortResult {
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
+    pub sample_id: Uuid,
+    #[serde(default)]
+    pub config_revision: u64,
+    #[serde(default)]
+    pub scheduled_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
     pub checked_at: Option<DateTime<Utc>>,
     pub status: CheckStatus,
     pub address: Option<String>,
     pub port: u16,
     pub latency_ms: Option<f64>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Short aliases used by clients that call this check simply a port check.
@@ -338,7 +368,7 @@ impl Default for ProbeKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ProbeTarget {
     pub id: Uuid,
     pub name: String,
@@ -373,7 +403,7 @@ impl Default for ProbeTarget {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct NodeMonitoringConfig {
     pub revision: u64,
     pub browser_latency_url: Option<String>,
@@ -524,19 +554,17 @@ mod tests {
     }
 
     #[test]
-    fn v2_checks_use_shared_status_and_allow_future_fields() {
+    fn v2_checks_use_shared_status_and_reject_unknown_config_fields() {
         let value = serde_json::json!({
             "revision": 4,
             "services": [],
             "probes": [{
                 "id": Uuid::nil(), "name": "dns", "kind": "dns",
-                "target": "example.test", "enabled": true,
-                "future_probe_option": "ignored"
+                "target": "example.test", "enabled": true
             }],
             "dns_checks": [{
                 "id": Uuid::nil(), "name": "authoritative",
-                "hostname": "example.test", "record_type": "A",
-                "status_hint": "future"
+                "hostname": "example.test", "record_type": "A"
             }],
             "process_checks": [{
                 "id": Uuid::nil(), "name": "worker", "process_name": "worker.exe"
@@ -544,7 +572,6 @@ mod tests {
             "local_port_checks": [{
                 "id": Uuid::nil(), "name": "http", "port": 8080
             }],
-            "future_section": true
         });
         let config: NodeMonitoringConfig = serde_json::from_value(value).unwrap();
         assert_eq!(config.probes[0].kind, ProbeKind::Dns);
@@ -557,6 +584,13 @@ mod tests {
             CheckStatus::from(ProbeStatus::PolicyDenied),
             CheckStatus::PolicyDenied
         );
+        let unknown = serde_json::json!({
+            "revision": 1,
+            "services": [],
+            "probes": [],
+            "future_section": true
+        });
+        assert!(serde_json::from_value::<NodeMonitoringConfig>(unknown).is_err());
     }
 
     #[test]
