@@ -4,6 +4,20 @@ Date: 2026-10-01 (Asia/Shanghai)
 
 ## Implemented
 
+- The monitoring configuration editor now exposes DNS, process and local-port
+  checks as separate typed sections. Process expectations, DNS record type and
+  expected answer, local bind address, interval and timeout are editable and
+  normalized before save.
+- Node details render DNS answers, process instance counts and local listening
+  port results independently. `policy_denied`, `permission_denied`,
+  `timeout`, `unavailable` and stale results retain separate status labels;
+  v1 nodes with absent extension arrays continue to render normally.
+- History queries accept the v2 event sections `dns`, `processes` and
+  `local_ports`, with event timestamps and metric selectors kept separate from
+  resource history.
+- Monitoring configuration rows collapse to one or two columns on narrow
+  screens while preserving native form controls and keyboard focus order.
+
 - Seven navigation destinations: overview, hosts, services, probes, alerts,
   groups and settings. Desktop sidebar and mobile bottom navigation retain
   direct access to each destination.

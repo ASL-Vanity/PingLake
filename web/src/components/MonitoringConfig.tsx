@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import { api, ApiError } from "../api";
-import type { LocalPortCheck, NodeMonitoringConfig, ProbeTarget, ProcessCheck, ServiceCheck } from "../monitoringTypes";
+import type { DnsCheck, LocalPortCheck, NodeMonitoringConfig, ProbeTarget, ProcessCheck, ServiceCheck } from "../monitoringTypes";
 import { ConfirmDialog } from "./ConfirmDialog";
 
 function origin(url: string | null): string | null {
@@ -14,11 +14,12 @@ export function MonitoringConfig({ nodeId, config, onSaved, onUnauthorized }: { 
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [reloadRequired, setReloadRequired] = useState(false);
-  const [remove, setRemove] = useState<{ kind: "services" | "probes" | "process_checks" | "local_port_checks"; id: string; name: string } | null>(null);
+  const [remove, setRemove] = useState<{ kind: "services" | "probes" | "dns_checks" | "process_checks" | "local_port_checks"; id: string; name: string } | null>(null);
   const documentOrigin = useRef(origin(config.browser_latency_url));
   const change = (value: Partial<NodeMonitoringConfig>) => { setDraft((current) => ({ ...current, ...value })); setSaved(false); };
   const changeService = (id: string, value: Partial<ServiceCheck>) => change({ services: draft.services.map((item) => item.id === id ? { ...item, ...value } : item) });
   const changeProbe = (id: string, value: Partial<ProbeTarget>) => change({ probes: draft.probes.map((item) => item.id === id ? { ...item, ...value } : item) });
+  const changeDns = (id: string, value: Partial<DnsCheck>) => change({ dns_checks: (draft.dns_checks ?? []).map((item) => item.id === id ? { ...item, ...value } : item) });
   const changeProcess = (id: string, value: Partial<ProcessCheck>) => change({ process_checks: (draft.process_checks ?? []).map((item) => item.id === id ? { ...item, ...value } : item) });
   const changePort = (id: string, value: Partial<LocalPortCheck>) => change({ local_port_checks: (draft.local_port_checks ?? []).map((item) => item.id === id ? { ...item, ...value } : item) });
   const save = async () => {
@@ -30,7 +31,7 @@ export function MonitoringConfig({ nodeId, config, onSaved, onUnauthorized }: { 
         const parsed = new URL(url);
         if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash) throw new Error("测点必须使用无凭证、无片段的 HTTPS URL");
       }
-      const value = await api.saveMonitoringConfig(nodeId, { ...draft, browser_latency_url: url, services: draft.services.map((item) => ({ ...item, name: item.name.trim() })), probes: draft.probes.map((item) => ({ ...item, name: item.name.trim(), target: item.target.trim(), port: item.kind === "tcp" ? item.port : null, expected_status: item.kind === "http" ? item.expected_status : null, response_contains: item.kind === "http" ? item.response_contains?.trim() || null : null })), dns_checks: draft.dns_checks ?? [], process_checks: draft.process_checks ?? [], local_port_checks: draft.local_port_checks ?? [] });
+      const value = await api.saveMonitoringConfig(nodeId, { ...draft, browser_latency_url: url, services: draft.services.map((item) => ({ ...item, name: item.name.trim() })), probes: draft.probes.map((item) => ({ ...item, name: item.name.trim(), target: item.target.trim(), port: item.kind === "tcp" ? item.port : null, expected_status: item.kind === "http" ? item.expected_status : null, response_contains: item.kind === "http" ? item.response_contains?.trim() || null : null })), dns_checks: (draft.dns_checks ?? []).map((item) => ({ ...item, name: item.name.trim(), hostname: item.hostname.trim(), expected_value: item.expected_value?.trim() || null })), process_checks: (draft.process_checks ?? []).map((item) => ({ ...item, name: item.name.trim(), process_name: item.process_name.trim() })), local_port_checks: (draft.local_port_checks ?? []).map((item) => ({ ...item, name: item.name.trim(), address: item.address?.trim() || null })) });
       setDraft(value); setSaved(true); onSaved(value);
       if (value.browser_latency_url && origin(value.browser_latency_url) !== documentOrigin.current) setReloadRequired(true);
     } catch (reason) {
@@ -43,6 +44,20 @@ export function MonitoringConfig({ nodeId, config, onSaved, onUnauthorized }: { 
     <fieldset disabled={saving}>
       <legend>访问延迟测点</legend>
       <label>HTTPS URL<input type="url" value={draft.browser_latency_url ?? ""} placeholder="https://node.example.com/pinglake/latency" onChange={(event) => change({ browser_latency_url: event.target.value || null })} /></label>
+    </fieldset>
+    <fieldset disabled={saving}>
+      <legend>DNS 检查</legend>
+      {(draft.dns_checks ?? []).map((check) => <div className="monitoring-config-row service-config-row" key={check.id}>
+        <label className="check-label"><input type="checkbox" checked={check.enabled} onChange={(event) => changeDns(check.id, { enabled: event.target.checked })} />启用</label>
+        <label>名称<input required maxLength={128} value={check.name} onChange={(event) => changeDns(check.id, { name: event.target.value })} /></label>
+        <label>主机名<input required maxLength={253} value={check.hostname} onChange={(event) => changeDns(check.id, { hostname: event.target.value })} /></label>
+        <label>记录类型<select value={check.record_type} onChange={(event) => changeDns(check.id, { record_type: event.target.value as DnsCheck["record_type"] })}><option value="A">A</option><option value="AAAA">AAAA</option></select></label>
+        <label>预期值<input maxLength={253} value={check.expected_value ?? ""} placeholder="可选" onChange={(event) => changeDns(check.id, { expected_value: event.target.value || null })} /></label>
+        <label>间隔（秒）<input required type="number" min={10} max={86400} value={check.interval_secs} onChange={(event) => changeDns(check.id, { interval_secs: Number(event.target.value) })} /></label>
+        <label>超时（毫秒）<input required type="number" min={1} max={Math.min(10000, check.interval_secs * 1000 - 1)} value={check.timeout_ms} onChange={(event) => changeDns(check.id, { timeout_ms: Number(event.target.value) })} /></label>
+        <button type="button" className="icon-button" title={`删除 DNS 检查 ${check.name || "配置"}`} aria-label={`删除 DNS 检查 ${check.name || "配置"}`} onClick={() => setRemove({ kind: "dns_checks", id: check.id, name: check.name || "DNS 检查" })}><Trash2 size={16} /></button>
+      </div>)}
+      <button type="button" className="secondary-button" onClick={() => change({ dns_checks: [...(draft.dns_checks ?? []), { id: crypto.randomUUID(), name: "", hostname: "", record_type: "A", expected_value: null, enabled: true, interval_secs: 30, timeout_ms: 5000 }] })}><Plus size={15} />添加 DNS 检查</button>
     </fieldset>
     <fieldset disabled={saving}>
       <legend>指定服务</legend>
@@ -76,7 +91,10 @@ export function MonitoringConfig({ nodeId, config, onSaved, onUnauthorized }: { 
         <label className="check-label"><input type="checkbox" checked={check.enabled} onChange={(event) => changeProcess(check.id, { enabled: event.target.checked })} />启用</label>
         <label>名称<input required maxLength={128} value={check.name} onChange={(event) => changeProcess(check.id, { name: event.target.value })} /></label>
         <label>进程名<input required maxLength={128} value={check.process_name} onChange={(event) => changeProcess(check.id, { process_name: event.target.value })} /></label>
+        <label>预期实例数<input type="number" min={0} max={100000} value={check.expected_count ?? ""} placeholder="按运行/停止" onChange={(event) => changeProcess(check.id, { expected_count: event.target.value === "" ? null : Number(event.target.value) })} /></label>
         <label>预期<select value={check.expected_state} onChange={(event) => changeProcess(check.id, { expected_state: event.target.value })}><option value="running">运行</option><option value="stopped">停止</option></select></label>
+        <label>间隔（秒）<input required type="number" min={10} max={86400} value={check.interval_secs} onChange={(event) => changeProcess(check.id, { interval_secs: Number(event.target.value) })} /></label>
+        <label>超时（毫秒）<input required type="number" min={1} max={Math.min(10000, check.interval_secs * 1000 - 1)} value={check.timeout_ms} onChange={(event) => changeProcess(check.id, { timeout_ms: Number(event.target.value) })} /></label>
         <button type="button" className="icon-button" title={`删除进程检查 ${check.name || "配置"}`} aria-label={`删除进程检查 ${check.name || "配置"}`} onClick={() => setRemove({ kind: "process_checks", id: check.id, name: check.name || "进程检查" })}><Trash2 size={16} /></button>
       </div>)}
       <button type="button" className="secondary-button" onClick={() => change({ process_checks: [...(draft.process_checks ?? []), { id: crypto.randomUUID(), name: "", process_name: "", expected_count: null, enabled: true, expected_state: "running", interval_secs: 30, timeout_ms: 5000 }] })}><Plus size={15} />添加进程检查</button>
@@ -86,7 +104,10 @@ export function MonitoringConfig({ nodeId, config, onSaved, onUnauthorized }: { 
       {(draft.local_port_checks ?? []).map((check) => <div className="monitoring-config-row service-config-row" key={check.id}>
         <label className="check-label"><input type="checkbox" checked={check.enabled} onChange={(event) => changePort(check.id, { enabled: event.target.checked })} />启用</label>
         <label>名称<input required maxLength={128} value={check.name} onChange={(event) => changePort(check.id, { name: event.target.value })} /></label>
+        <label>地址<input maxLength={253} value={check.address ?? ""} placeholder="默认本机监听" onChange={(event) => changePort(check.id, { address: event.target.value || null })} /></label>
         <label>端口<input required type="number" min={1} max={65535} value={check.port} onChange={(event) => changePort(check.id, { port: Number(event.target.value) })} /></label>
+        <label>间隔（秒）<input required type="number" min={10} max={86400} value={check.interval_secs} onChange={(event) => changePort(check.id, { interval_secs: Number(event.target.value) })} /></label>
+        <label>超时（毫秒）<input required type="number" min={1} max={Math.min(10000, check.interval_secs * 1000 - 1)} value={check.timeout_ms} onChange={(event) => changePort(check.id, { timeout_ms: Number(event.target.value) })} /></label>
         <button type="button" className="icon-button" title={`删除端口检查 ${check.name || "配置"}`} aria-label={`删除端口检查 ${check.name || "配置"}`} onClick={() => setRemove({ kind: "local_port_checks", id: check.id, name: check.name || "端口检查" })}><Trash2 size={16} /></button>
       </div>)}
       <button type="button" className="secondary-button" onClick={() => change({ local_port_checks: [...(draft.local_port_checks ?? []), { id: crypto.randomUUID(), name: "", address: null, port: 80, enabled: true, interval_secs: 30, timeout_ms: 5000 }] })}><Plus size={15} />添加端口检查</button>
@@ -95,6 +116,6 @@ export function MonitoringConfig({ nodeId, config, onSaved, onUnauthorized }: { 
     {saved && <p className="monitoring-save-status" role="status">配置版本 {draft.revision} 已保存，等待 Agent 确认</p>}
     {reloadRequired && <div className="monitoring-reload" role="status"><span>测点安全策略已更新，刷新页面后启用访问延迟。</span><button type="button" className="secondary-button" onClick={() => window.location.reload()}><RefreshCw size={15} />刷新页面</button></div>}
     <button type="submit" className="primary-button" disabled={saving}><Save size={16} />{saving ? "正在保存" : "保存配置"}</button>
-    {remove && <ConfirmDialog title="删除监测配置？" description={`将从配置中移除“${remove.name}”，保存后生效。`} busy={false} error={null} onCancel={() => setRemove(null)} onConfirm={() => { if (remove.kind === "services") change({ services: draft.services.filter((item) => item.id !== remove.id) }); else if (remove.kind === "probes") change({ probes: draft.probes.filter((item) => item.id !== remove.id) }); else if (remove.kind === "process_checks") change({ process_checks: (draft.process_checks ?? []).filter((item) => item.id !== remove.id) }); else change({ local_port_checks: (draft.local_port_checks ?? []).filter((item) => item.id !== remove.id) }); setRemove(null); }} />}
+    {remove && <ConfirmDialog title="删除监测配置？" description={`将从配置中移除“${remove.name}”，保存后生效。`} busy={false} error={null} onCancel={() => setRemove(null)} onConfirm={() => { if (remove.kind === "services") change({ services: draft.services.filter((item) => item.id !== remove.id) }); else if (remove.kind === "probes") change({ probes: draft.probes.filter((item) => item.id !== remove.id) }); else if (remove.kind === "dns_checks") change({ dns_checks: (draft.dns_checks ?? []).filter((item) => item.id !== remove.id) }); else if (remove.kind === "process_checks") change({ process_checks: (draft.process_checks ?? []).filter((item) => item.id !== remove.id) }); else change({ local_port_checks: (draft.local_port_checks ?? []).filter((item) => item.id !== remove.id) }); setRemove(null); }} />}
   </form>;
 }

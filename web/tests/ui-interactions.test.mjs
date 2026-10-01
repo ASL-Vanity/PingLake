@@ -9,7 +9,7 @@ import { createRoot } from "react-dom/client";
 
 const output = new URL("../.tmp/ui-fixture.mjs", import.meta.url);
 const bundled = await build({
-  stdin: { contents: 'export {default as App} from "./src/App"; export {NodeTable} from "./src/components/NodeTable"; export {GroupView} from "./src/components/GroupView"; export {SettingsDrawer} from "./src/components/SettingsDrawer"; export {NodeDetail} from "./src/components/NodeDetail"; export {FleetChecksView} from "./src/components/FleetChecksView"; export {useHistoryQuery, clearHistoryCache} from "./src/hooks/useHistoryQuery"; export {buildHistorySeries} from "./src/components/MonitoringHistory.helpers";', resolveDir: fileURLToPath(new URL("..", import.meta.url)), loader: "tsx" },
+  stdin: { contents: 'export {default as App} from "./src/App"; export {NodeTable} from "./src/components/NodeTable"; export {GroupView} from "./src/components/GroupView"; export {SettingsDrawer} from "./src/components/SettingsDrawer"; export {NodeDetail} from "./src/components/NodeDetail"; export {MonitoringConfig} from "./src/components/MonitoringConfig"; export {FleetChecksView} from "./src/components/FleetChecksView"; export {useHistoryQuery, clearHistoryCache} from "./src/hooks/useHistoryQuery"; export {buildHistorySeries} from "./src/components/MonitoringHistory.helpers";', resolveDir: fileURLToPath(new URL("..", import.meta.url)), loader: "tsx" },
   bundle: true, write: false, format: "esm", platform: "node", packages: "external", jsx: "automatic",
   plugins: [{ name: "fixture-style-modules", setup(builder) {
     builder.onLoad({ filter: /\.module\.css$/ }, () => ({ contents: "export default {}", loader: "js" }));
@@ -18,7 +18,7 @@ const bundled = await build({
 });
 await mkdir(new URL("../.tmp", import.meta.url), { recursive: true });
 await writeFile(output, bundled.outputFiles[0].text);
-const { App, NodeTable, GroupView, SettingsDrawer, NodeDetail, FleetChecksView, useHistoryQuery, clearHistoryCache, buildHistorySeries } = await import(output.href);
+const { App, NodeTable, GroupView, SettingsDrawer, NodeDetail, MonitoringConfig, FleetChecksView, useHistoryQuery, clearHistoryCache, buildHistorySeries } = await import(output.href);
 const dom = new JSDOM('<!doctype html><html><body><div id="test"></div></body></html>', { url: "http://fixture.test/" });
 after(() => dom.window.close());
 for (const name of ["window", "document", "HTMLElement", "HTMLButtonElement", "HTMLInputElement", "HTMLSelectElement", "Event", "MouseEvent", "KeyboardEvent"]) Object.defineProperty(globalThis, name, { value: dom.window[name], configurable: true });
@@ -34,7 +34,7 @@ let requests;
 const nodeId = "00000000-0000-4000-8000-000000000001";
 const group = { id: "00000000-0000-4000-8000-000000000099", name: "数据库", created_at: new Date().toISOString() };
 const settings = { cpu_percent: 85, memory_percent: 90, disk_percent: 85, temperature_celsius: 85, offline_after_seconds: 20, sustained_for_seconds: 60, offline_enabled: true, cpu_enabled: true, memory_enabled: true, disk_enabled: true, temperature_enabled: true, webhook_enabled: false, webhook_url: "", email_enabled: false, email_recipients: [] };
-const config = { revision: 1, browser_latency_url: null, services: [{ id: "service1", name: "dbus.service", enabled: true, expected_state: "running" }], probes: [{ id: "probe1", name: "网站", kind: "http", target: "https://example.com", port: null, enabled: true, interval_secs: 30, timeout_ms: 1000, expected_status: 200, response_contains: null }] };
+const config = { revision: 1, browser_latency_url: null, services: [{ id: "service1", name: "dbus.service", enabled: true, expected_state: "running" }], probes: [{ id: "probe1", name: "网站", kind: "http", target: "https://example.com", port: null, enabled: true, interval_secs: 30, timeout_ms: 1000, expected_status: 200, response_contains: null }], dns_checks: [], process_checks: [], local_port_checks: [] };
 function node(override = {}) {
   const now = new Date().toISOString();
   return { id: nodeId, display_name: "Node Alpha", hostname: "alpha.example", os: "Linux", os_version: "Debian", kernel_version: "6.1", architecture: "x86_64", agent_version: "0.1.0", enrolled_at: now, group_id: group.id, group_name: group.name, last_seen_at: now, browser_latency_url: null, online: true, latest: { collected_at: now, cpu_percent: 12, memory_used_bytes: 100, memory_total_bytes: 200, swap_used_bytes: 0, swap_total_bytes: 0, disk_used_bytes: 20, disk_total_bytes: 100, network_received_bytes_per_sec: 1024, network_transmitted_bytes_per_sec: 512, temperature_celsius: null, load_one: 0.1, load_five: 0.1, load_fifteen: 0.1, hub_latency_ms: 20, uptime_seconds: 100, process_count: 1, disks: [], processes: [], interfaces: [], monitoring: { schema_version: 1, session_id: "session1", sample_sequence: 1, report_interval_secs: 5, capabilities: {}, cpu_cores: [], cpu_times: {}, memory: {}, disk_io: [], inodes: [], network_health: [], tcp: { states: {}, listening_ports: 0, listening_sockets: 0 }, services: [{ id: "service1", name: "dbus.service", status: "ok", state: "running", healthy: true, checked_at: now, config_revision: 1 }], probes: [{ sample_id: "sample1", target_id: "probe1", config_revision: 1, status: "success", kind: "http", completed_at: now, scheduled_at: now, latency_ms: 20 }], agent: { applied_config_revision: 1, config_error: null, sample_age_ms: 0, collection_duration_ms: 1, upload_attempts: 1, upload_successes: 1, upload_failures: 0, consecutive_failures: 0, retries: 0, dropped_reports: 0, queue_length: 0, last_error: null } } }, ...override };
@@ -129,6 +129,36 @@ test("node detail has one navigation and shared range survives tab changes", asy
     assert.equal(container.querySelector('[aria-label="监测时间范围"]'), null);
     assert.ok(container.querySelector(".monitoring-config"));
   } finally { await cleanup(); }
+});
+
+test("v1 nodes remain readable while v2 checks expose DNS, process and local-port states", async () => {
+  const v2 = node();
+  v2.latest.monitoring.schema_version = 2;
+  const checkedAt = new Date().toISOString();
+  v2.latest.monitoring.dns_checks = [{ id: "dns1", name: "DNS", config_revision: 1, status: "policy_denied", hostname: "example.com", record_type: "A", answers: [], checked_at: checkedAt, latency_ms: null, error: "blocked", reason: "policy" }];
+  v2.latest.monitoring.process_checks = [{ id: "proc1", name: "worker", config_revision: 1, status: "permission_denied", process_name: "worker", count: null, expected_count: 1, checked_at: checkedAt, error: "denied", reason: null }];
+  v2.latest.monitoring.local_port_checks = [{ id: "port1", name: "HTTP", config_revision: 1, status: "unavailable", address: null, port: 8080, checked_at: checkedAt, latency_ms: null, error: "missing", reason: null }];
+  const v2Config = { ...config, dns_checks: [{ id: "dns1", name: "DNS", hostname: "example.com", record_type: "A", expected_value: null, enabled: true, interval_secs: 30, timeout_ms: 5000 }], process_checks: [{ id: "proc1", name: "worker", process_name: "worker", expected_count: 1, enabled: true, expected_state: "running", interval_secs: 30, timeout_ms: 5000 }], local_port_checks: [{ id: "port1", name: "HTTP", address: null, port: 8080, enabled: true, interval_secs: 30, timeout_ms: 5000 }] };
+  Object.assign(config, v2Config);
+  await mount(React.createElement(NodeDetail, { node: v2, initialTab: "probes", onBack() {}, onDelete: async () => {}, onRename: async () => v2, onUnauthorized() {}, onConfigSaved() {} }));
+  try {
+    assert.match(container.textContent, /DNS/);
+    assert.match(container.textContent, /策略禁止/);
+    assert.match(container.textContent, /本机端口/);
+    assert.match(container.textContent, /采集失败/);
+  } finally { await cleanup(); }
+  await mount(React.createElement(MonitoringConfig, { nodeId, config: v2Config, onSaved() {}, onUnauthorized() {} }));
+  try {
+    assert.ok(container.querySelector('input[aria-label="不存在"]') == null);
+    assert.match(container.textContent, /DNS 检查/);
+    assert.match(container.textContent, /进程检查/);
+    assert.match(container.textContent, /本机端口检查/);
+    const firstText = container.querySelectorAll("input")[0];
+    firstText.focus();
+    assert.equal(document.activeElement, firstText);
+    await act(async () => container.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    assert.ok(requests.some(({ options }) => options?.method === "PUT"));
+  } finally { Object.assign(config, { dns_checks: [], process_checks: [], local_port_checks: [] }); await cleanup(); }
 });
 
 test("history ignores obsolete responses and retains same-scope data during refresh", async () => {

@@ -62,4 +62,4 @@ export interface ProbeStatistics {
   p50_ms: number | null; p95_ms: number | null; p99_ms: number | null;
   observed_seconds: number; available_seconds: number; unknown_seconds: number;
 }
-export type MonitoringSection = "cpu" | "memory" | "disk" | "network" | "tcp" | "agent" | "services" | "probes" | "all";
+export type MonitoringSection = "cpu" | "memory" | "disk" | "network" | "tcp" | "agent" | "services" | "probes" | "dns" | "processes" | "local_ports" | "all";
