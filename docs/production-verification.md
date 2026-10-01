@@ -14,12 +14,13 @@ an actual HTTPS deployment, a Linux host, or a Windows service account.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - `cargo test --workspace --locked`
 - `cargo build --workspace --release --locked`
-- `npm --prefix web test` — 22 tests passed
+- `npm --prefix web test` — 23 tests passed
 - `npm --prefix web run build`
 - `scripts/e2e-smoke.ps1 -Port 18090 -LeaveRunning`
 - `scripts/e2e-monitoring.ps1 -RunRoot <smoke-run-root>`
 
-The monitoring E2E run verified five controlled probes, two service checks,
+The monitoring E2E run verified six controlled probes, two service checks,
+one process check, one local-port check and canonical DNS statistics,
 configuration revision application, detailed history with collection and Hub
 receipt timestamps, probe percentile statistics, group deletion preservation,
 the latency endpoint's allowed and rejected origins, and the no-store response.
@@ -28,11 +29,16 @@ points, authentication, offline detection and an offline alert.
 
 The Agent test suite covers the persisted pending-report queue, queue overflow,
 retry jitter, v1 schema downgrade, continued collection during Hub failures,
-DNS/ICMP/TCP/HTTP policy behavior, process checks, Windows SCM fixtures and
-native Windows collector fixtures. The Hub suite covers schema v5 migration,
+DNS/ICMP/TCP/HTTP policy behavior, process checks, local socket observations,
+Windows SCM fixtures and native Windows collector fixtures. The Hub suite covers
+schema v6 canonical check storage and schema v5 migration,
 deduplication, alert recovery, statistics and authorization. Protocol tests
 cover legacy enrollment defaults, strict configuration decoding and v2
 fixtures.
+
+The latest full Rust run completed 52 Agent tests, 26 Hub tests and 10 Protocol
+tests. Static analysis passed with `cargo clippy --workspace --all-targets
+--locked -- -D warnings`.
 
 ## Compatibility behavior
 
