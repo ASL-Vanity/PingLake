@@ -65,6 +65,12 @@ struct FileConfig {
     insecure_skip_verify: bool,
     #[serde(default)]
     allow_insecure_http: bool,
+    #[serde(default)]
+    allow_private_probe_targets: bool,
+    #[serde(default)]
+    allow_loopback_probe_targets: bool,
+    latency_bind: Option<std::net::SocketAddr>,
+    dashboard_origin: Option<String>,
 }
 
 #[derive(Debug)]
@@ -76,6 +82,10 @@ pub struct Settings {
     pub state_dir: Option<PathBuf>,
     pub insecure_skip_verify: bool,
     pub allow_insecure_http: bool,
+    pub allow_private_probe_targets: bool,
+    pub allow_loopback_probe_targets: bool,
+    pub latency_bind: Option<std::net::SocketAddr>,
+    pub dashboard_origin: Option<String>,
 }
 
 impl Settings {
@@ -108,6 +118,19 @@ impl Settings {
         if interval_secs == Some(0) {
             bail!("report interval must be at least one second")
         }
+        if let Some(bind) = file.latency_bind {
+            if !bind.ip().is_loopback() {
+                bail!("latency_bind must be a loopback address behind an HTTPS reverse proxy")
+            }
+            let origin = file
+                .dashboard_origin
+                .as_deref()
+                .context("dashboard_origin is required with latency_bind")?;
+            let parsed = Url::parse(origin).context("invalid dashboard_origin")?;
+            if parsed.scheme() != "https" || parsed.origin().ascii_serialization() != origin {
+                bail!("dashboard_origin must be an exact HTTPS origin without path or credentials")
+            }
+        }
 
         Ok(Self {
             hub_url,
@@ -119,6 +142,10 @@ impl Settings {
                 .insecure_skip_verify
                 .unwrap_or(file.insecure_skip_verify),
             allow_insecure_http,
+            allow_private_probe_targets: file.allow_private_probe_targets,
+            allow_loopback_probe_targets: file.allow_loopback_probe_targets,
+            latency_bind: file.latency_bind,
+            dashboard_origin: file.dashboard_origin,
         })
     }
 }

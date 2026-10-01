@@ -8,12 +8,20 @@ Agent 主动连接 Hub，因此被监控节点不需要域名、固定公网地�
 
 - Windows 与 Linux 统一 Agent
 - CPU、内存、Swap、磁盘、网络、温度、负载、进程数和运行时间
+- 每核心 CPU、可用内存、磁盘 IO/IOPS、inode、网卡错误/丢弃、TCP 状态及平台能力标记
+- 指定 systemd/Windows 服务、ICMP/TCP/HTTP 主动探测和 Agent 上报质量
+- 探测 P50/P95/P99、成功率、监测覆盖率和未知时长
+- 分组创建与删除；删除分组保留节点和历史
+- 浏览器到每台主机独立 HTTPS 测点的访问延迟（需配置测点）
 - 实时状态推送与 1/6/24 小时历史图表
 - CPU、内存、磁盘、温度和离线告警
 - 通用 JSON Webhook 通知
+- SMTP 邮件通知与按服务/探测对象分别去重的告警
 - SQLite 单文件存储，默认保留 7 天原始数据
 - Agent 密钥哈希存储、管理员会话、只读采集
 - Docker Hub 部署与 Windows/Linux 系统服务安装脚本
+
+新增指标的平台差异、测点配置、数据口径与数据库迁移见 [监测扩展说明](docs/monitoring-guide.md)。
 
 ## 快速启动 Hub
 

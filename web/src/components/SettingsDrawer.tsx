@@ -4,6 +4,7 @@ import type { ThemePreference } from "../App";
 import type { AlertSettings, NodeSnapshot } from "../types";
 
 interface SettingsDrawerProps {
+  inline?: boolean;
   open: boolean;
   settings: AlertSettings | null;
   nodes: NodeSnapshot[];
@@ -13,7 +14,7 @@ interface SettingsDrawerProps {
   onSave: (settings: AlertSettings) => Promise<AlertSettings>;
 }
 
-export function SettingsDrawer({ open, settings, nodes, themePreference, onThemeChange, onClose, onSave }: SettingsDrawerProps) {
+export function SettingsDrawer({ open, settings, nodes, themePreference, onThemeChange, onClose, onSave, inline = false }: SettingsDrawerProps) {
   const [draft, setDraft] = useState<AlertSettings | null>(settings);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +38,7 @@ export function SettingsDrawer({ open, settings, nodes, themePreference, onTheme
   }, [draft, open, settings]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || inline) return;
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -76,7 +77,7 @@ export function SettingsDrawer({ open, settings, nodes, themePreference, onTheme
       document.body.style.overflow = previousOverflow;
       previousFocus.current?.focus();
     };
-  }, [open]);
+  }, [open, inline]);
 
   if (!open) return null;
 
@@ -111,17 +112,18 @@ export function SettingsDrawer({ open, settings, nodes, themePreference, onTheme
   };
 
   return (
-    <div className="drawer-layer" role="presentation">
-      <button className="drawer-backdrop" type="button" onClick={onClose} aria-label="关闭设置" tabIndex={-1} />
-      <aside ref={drawerRef} className="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-describedby="settings-description" tabIndex={-1}>
+    <div className={inline ? "settings-inline" : "drawer-layer"} role="presentation">
+      {!inline && <button className="drawer-backdrop" type="button" onClick={onClose} aria-label="关闭设置" tabIndex={-1} />}
+      <aside ref={drawerRef} className="settings-drawer" role={inline ? "region" : "dialog"} aria-modal={inline ? undefined : true} aria-labelledby="settings-title" aria-describedby="settings-description" tabIndex={-1}>
         <header className="drawer-header">
           <div><Settings size={18} /><div><h2 id="settings-title">告警设置</h2><span id="settings-description">全局阈值与通知</span></div></div>
-          <button ref={closeButtonRef} type="button" className="icon-button" onClick={onClose} title="关闭" aria-label="关闭设置"><X size={18} /></button>
+          {!inline && <button ref={closeButtonRef} type="button" className="icon-button" onClick={onClose} title="关闭" aria-label="关闭设置"><X size={18} /></button>}
         </header>
         {!draft ? (
           <div className="drawer-loading"><LoaderCircle className="spin" size={22} />正在载入设置</div>
         ) : (
-          <form className="settings-form" onSubmit={submit}>
+          <form className="settings-form" onSubmit={submit} aria-busy={saving}>
+            <fieldset className="settings-edit-lock" disabled={saving}>
             <fieldset>
               <legend>界面主题</legend>
               <label className="field-label">
@@ -217,6 +219,7 @@ export function SettingsDrawer({ open, settings, nodes, themePreference, onTheme
               </label>
             </fieldset>
 
+            </fieldset>
             {error && <div className="form-error" role="alert">{error}</div>}
             <footer className="drawer-footer">
               {saved && <span className="save-confirmation">设置已保存</span>}

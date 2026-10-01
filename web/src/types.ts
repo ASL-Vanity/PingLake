@@ -1,3 +1,4 @@
+import type { MonitoringData } from "./monitoringTypes";
 export type ConnectionState = "connecting" | "live" | "polling";
 
 export interface DiskMetric {
@@ -22,6 +23,7 @@ export interface ProcessMetric {
 }
 
 export interface MetricReport {
+  monitoring?: MonitoringData | null;
   collected_at: string;
   cpu_percent: number;
   memory_used_bytes: number;
@@ -45,6 +47,7 @@ export interface MetricReport {
 }
 
 export interface NodeSnapshot {
+  browser_latency_url?: string | null;
   id: string;
   hostname: string;
   display_name: string;
@@ -80,9 +83,10 @@ export interface HistoryPoint {
   temperature_celsius: number | null;
 }
 
-export type AlertKind = "offline" | "cpu" | "memory" | "disk" | "temperature";
+export type AlertKind = "offline" | "cpu" | "memory" | "disk" | "temperature" | "service" | "probe";
 
 export interface AlertRecord {
+  subject_id?: string | null;
   id: number;
   node_id: string;
   node_name: string;
@@ -123,6 +127,7 @@ export interface DashboardSummary {
 }
 
 export type LiveEvent =
+  | { type: "groups_changed"; payload: HostGroup[] }
   | { type: "snapshot"; payload: NodeSnapshot }
   | { type: "alert"; payload: AlertRecord }
   | { type: "node_removed"; payload: { id: string } }

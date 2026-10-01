@@ -2,6 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod monitoring;
+pub use monitoring::*;
+
 pub const API_VERSION: &str = "v1";
 pub const DEFAULT_REPORT_INTERVAL_SECS: u64 = 5;
 
@@ -72,6 +75,8 @@ pub struct MetricReport {
     pub processes: Vec<ProcessMetric>,
     pub disks: Vec<DiskMetric>,
     pub interfaces: Vec<InterfaceMetric>,
+    #[serde(default)]
+    pub monitoring: Option<MonitoringData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +95,8 @@ pub struct NodeSnapshot {
     pub last_seen_at: Option<DateTime<Utc>>,
     pub online: bool,
     pub latest: Option<MetricReport>,
+    #[serde(default)]
+    pub browser_latency_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +129,8 @@ pub enum AlertKind {
     Memory,
     Disk,
     Temperature,
+    Service,
+    Probe,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +145,8 @@ pub struct AlertRecord {
     pub active: bool,
     pub opened_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub subject_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +218,7 @@ pub enum LiveEvent {
     Alert(AlertRecord),
     NodeRemoved { id: Uuid },
     SettingsChanged(AlertSettings),
+    GroupsChanged(Vec<HostGroup>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -33,10 +33,9 @@ export function LoginPage({ onAuthenticated }: LoginPageProps) {
       <section className="login-panel" aria-labelledby="login-title">
         <div className="brand-lockup login-brand">
           <span className="brand-mark"><img src="/pinglake-mark.svg" alt="" /></span>
-          <span>PingLake</span>
+          <span>PingLake<small>监控控制台</small></span>
         </div>
         <div className="login-heading">
-          <p className="eyebrow">MONITORING CONSOLE</p>
           <h1 id="login-title">登录控制台</h1>
           <p>使用 Hub 管理员密码继续</p>
         </div>
@@ -71,11 +70,6 @@ export function LoginPage({ onAuthenticated }: LoginPageProps) {
           </button>
         </form>
       </section>
-      <div className="login-environment" aria-hidden="true">
-        <div className="pulse-trace" />
-        <span>HUB / AGENT STATUS</span>
-        <strong>READY</strong>
-      </div>
     </main>
   );
 }

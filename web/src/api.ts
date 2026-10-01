@@ -6,6 +6,7 @@ import type {
   HostGroup,
   NodeSnapshot,
 } from "./types";
+import type { MonitoringHistoryPoint, MonitoringSection, NodeMonitoringConfig, ProbeStatistics } from "./monitoringTypes";
 
 const API_BASE = "/api/v1";
 
@@ -48,6 +49,14 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  monitoringConfig: (id: string, signal?: AbortSignal) => request<NodeMonitoringConfig>(`/nodes/${encodeURIComponent(id)}/monitoring`, { signal }),
+  saveMonitoringConfig: (id: string, config: NodeMonitoringConfig) => request<NodeMonitoringConfig>(`/nodes/${encodeURIComponent(id)}/monitoring`, { method: "PUT", body: JSON.stringify(config) }),
+  monitoringHistory: (id: string, minutes: number, section: MonitoringSection, device: string | undefined, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ minutes: String(minutes), section });
+    if (device) query.set("device", device);
+    return request<MonitoringHistoryPoint[]>(`/nodes/${encodeURIComponent(id)}/monitoring/history?${query}`, { signal });
+  },
+  probeStatistics: (id: string, minutes: number, signal?: AbortSignal) => request<ProbeStatistics[]>(`/nodes/${encodeURIComponent(id)}/probes/statistics?minutes=${minutes}`, { signal }),
   me: (signal?: AbortSignal) => request<{ authenticated: boolean }>("/auth/me", { signal }),
   login: (password: string) =>
     request<{ authenticated: boolean }>("/auth/login", {

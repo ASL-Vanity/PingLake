@@ -1,7 +1,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use pinglake_protocol::{EnrollRequest, EnrollResponse, MetricReport};
+use pinglake_protocol::{EnrollRequest, EnrollResponse, MetricReport, NodeMonitoringConfig};
 use reqwest::{Client, StatusCode};
 use url::Url;
 use uuid::Uuid;
@@ -31,6 +31,7 @@ pub struct ApiClient {
     client: Client,
     enroll_url: Url,
     metrics_url: Url,
+    config_url: Url,
 }
 
 impl ApiClient {
@@ -38,7 +39,9 @@ impl ApiClient {
         hub_url.set_path(ENROLL_PATH);
         let enroll_url = hub_url.clone();
         hub_url.set_path(METRICS_PATH);
-        let metrics_url = hub_url;
+        let metrics_url = hub_url.clone();
+        hub_url.set_path("/api/v1/agent/config");
+        let config_url = hub_url;
 
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -52,6 +55,7 @@ impl ApiClient {
             client,
             enroll_url,
             metrics_url,
+            config_url,
         })
     }
 
@@ -87,6 +91,36 @@ impl ApiClient {
             .map_err(transport_error)?;
 
         classify_status(response.status())
+    }
+
+    pub async fn monitoring_config(
+        &self,
+        agent_id: Uuid,
+        agent_secret: &str,
+    ) -> Result<NodeMonitoringConfig, SendError> {
+        let mut response = self
+            .client
+            .get(self.config_url.clone())
+            .header("X-Agent-ID", agent_id.to_string())
+            .bearer_auth(agent_secret)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(NodeMonitoringConfig::default());
+        }
+        classify_status(response.status())?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
+            if bytes.len() + chunk.len() > 64 * 1024 {
+                return Err(SendError::Transient(
+                    "configuration exceeds size limit".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|_| SendError::Transient("invalid monitoring configuration".into()))
     }
 }
 

@@ -1,0 +1,40 @@
+.dashboard { display: grid; gap: 18px; }
+.statBand { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border); background: var(--surface); border-radius: 8px; overflow: hidden; }
+.stat { min-height: 102px; display: flex; align-items: center; gap: 12px; padding: 18px 20px; border-right: 1px solid var(--border); }
+.stat:last-child { border-right: 0; }
+.statIcon { width: 32px; height: 32px; display: grid; place-items: center; color: var(--text-muted); background: var(--canvas); border-radius: 6px; }
+.statCopy { display: grid; gap: 2px; min-width: 0; }
+.statCopy small, .statCopy em { color: var(--text-muted); font-size: 12px; font-style: normal; }
+.statCopy strong { color: var(--text); font-size: 25px; line-height: 1.1; font-weight: 700; }
+.good .statIcon { color: var(--green); background: color-mix(in srgb, var(--green) 10%, var(--surface)); }
+.warning .statIcon { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, var(--surface)); }
+.critical .statIcon { color: var(--red); background: color-mix(in srgb, var(--red) 11%, var(--surface)); }
+.mainGrid, .lowerGrid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(310px, .9fr); gap: 18px; }
+.trendSection, .fleetSection, .alertSection, .exceptionSection { min-width: 0; border-top: 2px solid var(--border-strong); padding-top: 14px; }
+.sectionHeader { min-height: 42px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.eyebrow { margin: 0 0 3px; color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.sectionHeader h2 { margin: 0; color: var(--text); font-size: 18px; line-height: 1.25; }
+.linkButton { display: inline-flex; align-items: center; gap: 4px; padding: 3px 0; color: var(--blue); background: transparent; border: 0; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0 10px; }
+.controls label { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px; }
+.controls select { min-height: 30px; max-width: 190px; padding: 0 26px 0 8px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; }
+.segmented { display: inline-flex; margin-left: auto; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+.segmented button { min-height: 30px; padding: 0 9px; color: var(--text-muted); background: var(--surface); border: 0; border-right: 1px solid var(--border); font-size: 11px; cursor: pointer; }
+.segmented button:last-child { border-right: 0; }
+.segmented button.active { color: var(--text); background: var(--surface-muted); font-weight: 700; }
+.chartFrame { height: 276px; min-height: 220px; padding: 6px 0 0; border-bottom: 1px solid var(--border); }
+.chartEmpty, .clearState, .emptyState { min-height: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--text-muted); font-size: 13px; }
+.trendFooter { display: flex; justify-content: space-between; gap: 12px; padding-top: 8px; color: var(--text-muted); font-size: 11px; }
+.fleetMatrix { display: grid; gap: 0; border-bottom: 1px solid var(--border); }
+.fleetRow { min-width: 0; min-height: 57px; display: grid; grid-template-columns: 10px minmax(110px, 1fr) minmax(60px, .8fr) 42px 16px; align-items: center; gap: 9px; padding: 8px 3px; color: var(--text); text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+.fleetRow:hover { background: var(--surface-muted); }
+.statusDot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); }
+.statusDot.ok { background: var(--green); }.statusDot.warn { background: var(--amber); }.statusDot.bad { background: var(--red); }
+.fleetName { min-width: 0; display: grid; gap: 2px; }.fleetName strong, .fleetName small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.fleetName strong { font-size: 12px; }.fleetName small { color: var(--text-muted); font-size: 10px; }
+.fleetBar { height: 5px; overflow: hidden; background: var(--surface-muted); border-radius: 3px; }.fleetBar i { display: block; height: 100%; background: var(--blue); border-radius: inherit; }
+.fleetValue { color: var(--text-muted); font-size: 11px; text-align: right; }
+.alertList { display: grid; border-bottom: 1px solid var(--border); }.alertRow { min-height: 57px; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 8px 2px; color: var(--text); text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }.alertRow:hover { background: var(--surface-muted); }.alertRow > span:nth-child(2) { display: grid; gap: 2px; min-width: 0; }.alertRow strong, .alertRow small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.alertRow strong { font-size: 12px; }.alertRow small, .alertState { color: var(--text-muted); font-size: 11px; }.alertState { white-space: nowrap; }.alertIcon { width: 27px; height: 27px; display: grid; place-items: center; border-radius: 50%; }.alertActive { color: var(--red); background: var(--red-soft); }.alertResolved { color: var(--green); background: var(--green-soft); }
+.exceptionSection { display: grid; align-content: start; gap: 4px; }.exception { min-height: 58px; display: grid; grid-template-columns: 28px minmax(0, 1fr) 16px; align-items: center; gap: 9px; padding: 7px 2px; color: var(--text); text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }.exception:hover { background: var(--surface-muted); }.exception > span:first-child { color: var(--text-muted); }.exception > span:nth-child(2) { display: grid; gap: 1px; }.exception small { color: var(--text-muted); font-size: 11px; }.exception strong { font-size: 19px; }
+.emptyState { min-height: 310px; flex-direction: column; padding: 30px; text-align: center; border-top: 2px solid var(--border-strong); }.emptyState h2 { margin: 0; color: var(--text); font-size: 19px; }.emptyState p { max-width: 360px; margin: 0; color: var(--text-muted); font-size: 13px; }.emptyState button { display: inline-flex; align-items: center; gap: 6px; }
+@media (max-width: 900px) { .mainGrid, .lowerGrid { grid-template-columns: 1fr; }.fleetMatrix { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 14px; }.fleetRow { grid-template-columns: 10px minmax(80px, 1fr) 45px 16px; }.fleetBar { display: none; } }
+@media (max-width: 620px) { .statBand { grid-template-columns: repeat(2, minmax(0, 1fr)); }.stat:nth-child(2) { border-right: 0; }.stat:nth-child(-n + 2) { border-bottom: 1px solid var(--border); }.controls { align-items: stretch; }.segmented { order: 3; width: 100%; margin-left: 0; }.segmented button { flex: 1; }.controls label { flex: 1; }.controls select { width: 100%; max-width: none; }.chartFrame { height: 235px; }.fleetMatrix { grid-template-columns: 1fr; } }

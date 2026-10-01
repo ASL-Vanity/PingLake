@@ -14,6 +14,8 @@ const kindLabels: Record<AlertKind, string> = {
   memory: "内存",
   disk: "磁盘",
   temperature: "温度",
+  service: "服务",
+  probe: "主动探测",
 };
 
 export function AlertsView({ alerts, onOpenNode }: AlertsViewProps) {
@@ -81,5 +83,6 @@ export function AlertsView({ alerts, onOpenNode }: AlertsViewProps) {
 function formatAlertValue(kind: AlertKind, value: number): string {
   if (kind === "temperature") return `${value.toFixed(1)} °C`;
   if (kind === "offline") return `${value.toFixed(0)} 秒`;
+  if (kind === "service" || kind === "probe") return String(value);
   return `${value.toFixed(1)}%`;
 }

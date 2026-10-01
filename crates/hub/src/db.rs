@@ -45,6 +45,7 @@ struct NodeRow {
     agent_version: String,
     group_id: Option<Uuid>,
     group_name: Option<String>,
+    browser_latency_url: Option<String>,
     enrolled_at: DateTime<Utc>,
     last_seen_at: Option<DateTime<Utc>>,
 }
@@ -159,7 +160,32 @@ impl Database {
         }
 
         let now = Utc::now();
+        if let Some(data) = &report.monitoring
+            && !data.session_id.is_nil()
+        {
+            let duplicate = transaction.query_row(
+                    "SELECT 1 FROM metrics WHERE node_id = ?1 AND monitoring_session = ?2 AND monitoring_sequence = ?3",
+                    params![node_id.to_string(), data.session_id.to_string(), data.sample_sequence.to_string()],
+                    |_| Ok(()),
+                ).optional()?.is_some();
+            if duplicate {
+                transaction.execute(
+                    "UPDATE nodes SET last_seen_at = ?2 WHERE id = ?1",
+                    params![node_id.to_string(), timestamp(now)],
+                )?;
+                let node = get_node_row(&transaction, node_id)?
+                    .ok_or_else(|| anyhow!("node disappeared"))?;
+                let latest = latest_metric(&transaction, node_id)?;
+                let settings = get_settings_from(&transaction)?;
+                transaction.commit()?;
+                return Ok(Some(MetricResult {
+                    snapshot: node_snapshot(node, latest, &settings, now),
+                    alerts: Vec::new(),
+                }));
+            }
+        }
         insert_metric(&transaction, node_id, report, now)?;
+        crate::monitoring::insert_results(&transaction, node_id, report, now)?;
         transaction.execute(
             "UPDATE nodes SET last_seen_at = ?2 WHERE id = ?1",
             params![node_id.to_string(), timestamp(now)],
@@ -225,6 +251,13 @@ impl Database {
                 alerts.push(alert);
             }
         }
+        alerts.extend(apply_monitoring_alerts(
+            &transaction,
+            &node,
+            report,
+            &settings,
+            now,
+        )?);
 
         transaction.commit()?;
         Ok(Some(MetricResult {
@@ -243,6 +276,7 @@ impl Database {
                 last_seen_at: Some(now),
                 online: true,
                 latest: Some(report.clone()),
+                browser_latency_url: node.browser_latency_url,
             },
             alerts,
         }))
@@ -254,7 +288,7 @@ impl Database {
         let now = Utc::now();
         let mut statement = connection.prepare(
             "SELECT nodes.id, hostname, display_name, os, os_version, kernel_version,
-                    architecture, agent_version, enrolled_at, last_seen_at, nodes.group_id, groups.name
+                    architecture, agent_version, enrolled_at, last_seen_at, nodes.group_id, groups.name, nodes.browser_latency_url
              FROM nodes LEFT JOIN groups ON groups.id = nodes.group_id
              ORDER BY groups.name COLLATE NOCASE, display_name COLLATE NOCASE, hostname COLLATE NOCASE",
         )?;
@@ -313,7 +347,7 @@ impl Database {
         let connection = self.lock()?;
         let mut statement = connection.prepare(
             "SELECT id, node_id, node_name, kind, message, value, threshold,
-                    active, opened_at, resolved_at
+                    active, opened_at, resolved_at, subject_id
              FROM alerts ORDER BY opened_at DESC, id DESC LIMIT 500",
         )?;
         let alerts = statement
@@ -468,7 +502,7 @@ impl Database {
         let nodes = {
             let mut statement = transaction.prepare(
                 "SELECT nodes.id, hostname, display_name, os, os_version, kernel_version,
-                        architecture, agent_version, enrolled_at, last_seen_at, nodes.group_id, groups.name
+                        architecture, agent_version, enrolled_at, last_seen_at, nodes.group_id, groups.name, nodes.browser_latency_url
                  FROM nodes LEFT JOIN groups ON groups.id = nodes.group_id",
             )?;
             statement
@@ -511,13 +545,29 @@ impl Database {
     pub fn cleanup_old_metrics(&self) -> Result<usize> {
         let connection = self.lock()?;
         let cutoff = Utc::now() - chrono::Duration::days(METRIC_RETENTION_DAYS);
-        Ok(connection.execute(
+        let deleted = connection.execute(
             "DELETE FROM metrics WHERE received_at < ?1",
             [timestamp(cutoff)],
-        )?)
+        )?;
+        connection.execute(
+            "DELETE FROM probe_samples WHERE received_at < ?1",
+            [timestamp(cutoff)],
+        )?;
+        connection.execute(
+            "DELETE FROM service_samples WHERE received_at < ?1",
+            [timestamp(cutoff)],
+        )?;
+        connection.execute(
+            "DELETE FROM monitoring_configs WHERE effective_at < ?1 AND revision < (
+                SELECT MAX(baseline.revision) FROM monitoring_configs baseline
+                WHERE baseline.node_id = monitoring_configs.node_id AND baseline.effective_at < ?1
+             )",
+            [timestamp(cutoff)],
+        )?;
+        Ok(deleted)
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         self.connection
             .lock()
             .map_err(|_| anyhow!("database mutex poisoned"))
@@ -597,6 +647,159 @@ fn apply_threshold_check(
     )?))
 }
 
+fn apply_monitoring_alerts(
+    transaction: &Transaction<'_>,
+    node: &NodeRow,
+    report: &MetricReport,
+    settings: &AlertSettings,
+    now: DateTime<Utc>,
+) -> Result<Vec<AlertRecord>> {
+    use pinglake_protocol::{MetricStatus, ProbeStatus};
+    let Some(data) = &report.monitoring else {
+        return Ok(Vec::new());
+    };
+    let config = crate::monitoring::config_from(transaction, node.id)?;
+    let mut checks = Vec::new();
+    for service in &data.services {
+        if service.config_revision != config.revision {
+            continue;
+        }
+        let Some(target) = config
+            .services
+            .iter()
+            .find(|check| check.id == service.id && check.enabled)
+        else {
+            continue;
+        };
+        let healthy = (service.status == MetricStatus::Ok)
+            .then_some(service.healthy)
+            .flatten();
+        checks.push((
+            AlertKind::Service,
+            service.id,
+            healthy,
+            service.checked_at,
+            data.report_interval_secs.max(5),
+            format!(
+                "Service {} is {} (expected {})",
+                target.name, service.state, target.expected_state
+            ),
+        ));
+    }
+    for probe in &data.probes {
+        if probe.config_revision != config.revision {
+            continue;
+        }
+        let Some(target) = config
+            .probes
+            .iter()
+            .find(|check| check.id == probe.target_id && check.enabled)
+        else {
+            continue;
+        };
+        let healthy = match probe.status {
+            ProbeStatus::Success => Some(true),
+            ProbeStatus::Failure | ProbeStatus::Timeout => Some(false),
+            _ => None,
+        };
+        checks.push((
+            AlertKind::Probe,
+            probe.target_id,
+            healthy,
+            probe.scheduled_at,
+            target.interval_secs,
+            format!(
+                "Probe {} failed: {}",
+                target.name,
+                probe.error.as_deref().unwrap_or("target unavailable")
+            ),
+        ));
+    }
+    checks.sort_by_key(|check| check.3);
+    let mut alerts = Vec::new();
+    for (kind, subject, healthy, sampled_at, interval, message) in checks {
+        let sampled_at = parse_timestamp(timestamp(sampled_at))?;
+        // Delayed backlog is persisted for history but cannot change current alert state.
+        if sampled_at > now
+            || now.signed_duration_since(sampled_at).num_seconds()
+                > interval.saturating_mul(2).max(60) as i64
+        {
+            continue;
+        }
+        let subject = subject.to_string();
+        let previous: Option<(String, Option<String>)> = transaction.query_row(
+            "SELECT last_sample_at, pending_since FROM monitoring_check_state WHERE node_id=?1 AND kind=?2 AND subject_id=?3",
+            params![node.id.to_string(), kind_name(&kind), subject], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let mut pending = None;
+        if let Some((last_at, pending_since)) = previous {
+            let last_at = parse_timestamp(last_at)?;
+            if sampled_at <= last_at {
+                continue;
+            }
+            if sampled_at.signed_duration_since(last_at).num_seconds()
+                <= interval.saturating_mul(2) as i64
+            {
+                pending = pending_since.map(parse_timestamp).transpose()?;
+            }
+        }
+        if healthy == Some(false) {
+            pending = Some(pending.unwrap_or(sampled_at));
+        } else {
+            pending = None;
+        }
+        transaction.execute(
+            "INSERT INTO monitoring_check_state(node_id, kind, subject_id, last_sample_at, pending_since) VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(node_id,kind,subject_id) DO UPDATE SET last_sample_at=excluded.last_sample_at,pending_since=excluded.pending_since",
+            params![node.id.to_string(), kind_name(&kind), subject, timestamp(sampled_at), pending.map(timestamp)],
+        )?;
+        let active: Option<AlertRecord> = transaction.query_row(
+            "SELECT id,node_id,node_name,kind,message,value,threshold,active,opened_at,resolved_at,subject_id
+             FROM alerts WHERE node_id=?1 AND kind=?2 AND subject_id=?3 AND active=1",
+            params![node.id.to_string(), kind_name(&kind), subject], map_alert,
+        ).optional()?;
+        if healthy == Some(true) {
+            if let Some(mut active) = active {
+                transaction.execute(
+                    "UPDATE alerts SET active=0,resolved_at=?2 WHERE id=?1",
+                    params![active.id, timestamp(now)],
+                )?;
+                active.active = false;
+                active.resolved_at = Some(now);
+                alerts.push(active);
+            }
+        } else if healthy == Some(false)
+            && active.is_none()
+            && pending.is_some_and(|since| {
+                sampled_at.signed_duration_since(since).num_seconds()
+                    >= settings.sustained_for_seconds as i64
+            })
+        {
+            let node_name = if node.display_name.is_empty() {
+                node.hostname.clone()
+            } else {
+                node.display_name.clone()
+            };
+            transaction.execute("INSERT INTO alerts(node_id,node_name,kind,subject_id,message,active,opened_at) VALUES(?1,?2,?3,?4,?5,1,?6)",
+                params![node.id.to_string(), node_name, kind_name(&kind), subject, message, timestamp(now)])?;
+            alerts.push(AlertRecord {
+                id: transaction.last_insert_rowid(),
+                node_id: node.id,
+                node_name,
+                kind,
+                subject_id: Some(subject),
+                message,
+                value: None,
+                threshold: None,
+                active: true,
+                opened_at: now,
+                resolved_at: None,
+            });
+        }
+    }
+    Ok(alerts)
+}
+
 fn insert_metric(
     transaction: &Transaction<'_>,
     node_id: Uuid,
@@ -609,10 +812,11 @@ fn insert_metric(
             memory_used_bytes, memory_total_bytes, swap_used_bytes, swap_total_bytes,
             disk_used_bytes, disk_total_bytes, network_received_bytes_per_sec,
             network_transmitted_bytes_per_sec, load_one, load_five, load_fifteen,
-            temperature_celsius, hub_latency_ms, uptime_seconds, process_count, processes_json, disks_json, interfaces_json
+            temperature_celsius, hub_latency_ms, uptime_seconds, process_count, processes_json, disks_json, interfaces_json,
+            monitoring_json, monitoring_session, monitoring_sequence
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
          )",
         params![
             node_id.to_string(),
@@ -637,6 +841,9 @@ fn insert_metric(
             serde_json::to_string(&report.processes)?,
             serde_json::to_string(&report.disks)?,
             serde_json::to_string(&report.interfaces)?,
+            report.monitoring.as_ref().map(serde_json::to_string).transpose()?,
+            report.monitoring.as_ref().filter(|data| !data.session_id.is_nil()).map(|data| data.session_id.to_string()),
+            report.monitoring.as_ref().filter(|data| !data.session_id.is_nil()).map(|data| data.sample_sequence.to_string()),
         ],
     )?;
     Ok(())
@@ -649,7 +856,7 @@ fn latest_metric(connection: &Connection, node_id: Uuid) -> Result<Option<Metric
                     swap_used_bytes, swap_total_bytes, disk_used_bytes, disk_total_bytes,
                     network_received_bytes_per_sec, network_transmitted_bytes_per_sec,
                     load_one, load_five, load_fifteen, temperature_celsius, hub_latency_ms, uptime_seconds,
-                    process_count, processes_json, disks_json, interfaces_json
+                    process_count, processes_json, disks_json, interfaces_json, monitoring_json
              FROM metrics WHERE node_id = ?1 ORDER BY id DESC LIMIT 1",
             [node_id.to_string()],
             |row| {
@@ -681,6 +888,7 @@ fn latest_metric(connection: &Connection, node_id: Uuid) -> Result<Option<Metric
                     processes: serde_json::from_str(&processes_json).map_err(sql_conversion)?,
                     disks: serde_json::from_str(&disks_json).map_err(sql_conversion)?,
                     interfaces: serde_json::from_str(&interfaces_json).map_err(sql_conversion)?,
+                    monitoring: row.get::<_, Option<String>>(20)?.map(|json| serde_json::from_str(&json).map_err(sql_conversion)).transpose()?,
                 })
             },
         )
@@ -692,7 +900,7 @@ fn get_node_row(transaction: &Transaction<'_>, node_id: Uuid) -> Result<Option<N
     transaction
         .query_row(
             "SELECT nodes.id, hostname, display_name, os, os_version, kernel_version,
-                    architecture, agent_version, enrolled_at, last_seen_at, nodes.group_id, groups.name
+                    architecture, agent_version, enrolled_at, last_seen_at, nodes.group_id, groups.name, nodes.browser_latency_url
              FROM nodes LEFT JOIN groups ON groups.id = nodes.group_id WHERE nodes.id = ?1",
             [node_id.to_string()],
             map_node_row,
@@ -720,6 +928,7 @@ fn map_node_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
             .transpose()
             .map_err(sql_conversion)?,
         group_name: row.get(11)?,
+        browser_latency_url: row.get(12)?,
         enrolled_at: parse_timestamp(enrolled_at).map_err(sql_conversion)?,
         last_seen_at: last_seen_at
             .map(parse_timestamp)
@@ -749,6 +958,7 @@ fn node_snapshot(
         agent_version: node.agent_version,
         group_id: node.group_id,
         group_name: node.group_name,
+        browser_latency_url: node.browser_latency_url,
         enrolled_at: node.enrolled_at,
         last_seen_at: node.last_seen_at,
         online,
@@ -796,6 +1006,7 @@ fn open_alert(
         active: true,
         opened_at: now,
         resolved_at: None,
+        subject_id: None,
     })
 }
 
@@ -808,7 +1019,7 @@ fn resolve_alert(
     let alert = transaction
         .query_row(
             "SELECT id, node_id, node_name, kind, message, value, threshold,
-                    active, opened_at, resolved_at
+                    active, opened_at, resolved_at, subject_id
              FROM alerts WHERE node_id = ?1 AND kind = ?2 AND active = 1 LIMIT 1",
             params![node_id.to_string(), kind_name(kind)],
             map_alert,
@@ -846,6 +1057,7 @@ fn map_alert(row: &rusqlite::Row<'_>) -> rusqlite::Result<AlertRecord> {
     let kind: String = row.get(3)?;
     let opened_at: String = row.get(8)?;
     let resolved_at: Option<String> = row.get(9)?;
+    let subject_id: String = row.get(10)?;
     Ok(AlertRecord {
         id: row.get(0)?,
         node_id: Uuid::parse_str(&node_id).map_err(sql_conversion)?,
@@ -860,6 +1072,7 @@ fn map_alert(row: &rusqlite::Row<'_>) -> rusqlite::Result<AlertRecord> {
             .map(parse_timestamp)
             .transpose()
             .map_err(sql_conversion)?,
+        subject_id: (!subject_id.is_empty()).then_some(subject_id),
     })
 }
 
@@ -873,7 +1086,7 @@ fn get_settings_from(connection: &Connection) -> Result<AlertSettings> {
 
 fn migrate(connection: &Connection) -> Result<()> {
     let mut version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version > 4 {
+    if version > 5 {
         bail!("database schema version {version} is newer than this Hub supports");
     }
     if version == 0 {
@@ -994,6 +1207,64 @@ fn migrate(connection: &Connection) -> Result<()> {
         )?;
         transaction.pragma_update(None, "user_version", 4)?;
         transaction.commit()?;
+        version = 4;
+    }
+    if version == 4 {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute_batch(
+            "ALTER TABLE nodes ADD COLUMN browser_latency_url TEXT;
+             ALTER TABLE alerts ADD COLUMN subject_id TEXT NOT NULL DEFAULT '';
+             DROP INDEX alerts_one_active_kind_idx;
+             CREATE UNIQUE INDEX alerts_one_active_kind_idx ON alerts(node_id, kind, subject_id) WHERE active = 1;
+             ALTER TABLE metrics ADD COLUMN monitoring_json TEXT;
+             ALTER TABLE metrics ADD COLUMN monitoring_session TEXT;
+             ALTER TABLE metrics ADD COLUMN monitoring_sequence TEXT;
+             CREATE UNIQUE INDEX metrics_monitoring_sample_idx
+               ON metrics(node_id, monitoring_session, monitoring_sequence) WHERE monitoring_session IS NOT NULL;
+             CREATE TABLE monitoring_configs (
+                node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                revision INTEGER NOT NULL,
+                effective_at TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                PRIMARY KEY(node_id, revision)
+             );
+             CREATE INDEX monitoring_configs_time_idx ON monitoring_configs(node_id, effective_at);
+             CREATE TABLE probe_samples (
+                node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                sample_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                config_revision INTEGER NOT NULL,
+                scheduled_at TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                PRIMARY KEY(node_id, sample_id)
+             );
+             CREATE INDEX probe_samples_target_time_idx ON probe_samples(node_id, target_id, scheduled_at);
+             CREATE INDEX probe_samples_received_idx ON probe_samples(node_id, received_at DESC);
+             CREATE INDEX probe_samples_retention_idx ON probe_samples(received_at);
+             CREATE TABLE service_samples (
+                node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                subject_id TEXT NOT NULL,
+                config_revision INTEGER NOT NULL,
+                checked_at TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                PRIMARY KEY(node_id, subject_id, config_revision, checked_at)
+             );
+             CREATE INDEX service_samples_time_idx ON service_samples(node_id, checked_at);
+             CREATE INDEX service_samples_received_idx ON service_samples(node_id, received_at DESC);
+             CREATE INDEX service_samples_retention_idx ON service_samples(received_at);
+             CREATE TABLE monitoring_check_state (
+                node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                last_sample_at TEXT NOT NULL,
+                pending_since TEXT,
+                PRIMARY KEY(node_id, kind, subject_id)
+             );"
+        )?;
+        transaction.pragma_update(None, "user_version", 5)?;
+        transaction.commit()?;
     }
     Ok(())
 }
@@ -1085,6 +1356,8 @@ fn kind_name(kind: &AlertKind) -> &'static str {
         AlertKind::Memory => "memory",
         AlertKind::Disk => "disk",
         AlertKind::Temperature => "temperature",
+        AlertKind::Service => "service",
+        AlertKind::Probe => "probe",
     }
 }
 
@@ -1095,6 +1368,8 @@ fn parse_kind(value: &str) -> Result<AlertKind> {
         "memory" => Ok(AlertKind::Memory),
         "disk" => Ok(AlertKind::Disk),
         "temperature" => Ok(AlertKind::Temperature),
+        "service" => Ok(AlertKind::Service),
+        "probe" => Ok(AlertKind::Probe),
         _ => bail!("invalid alert kind in database"),
     }
 }
@@ -1107,7 +1382,7 @@ fn from_i64(value: i64) -> Result<u64> {
     u64::try_from(value).context("negative metric value in database")
 }
 
-fn constant_time_equal(left: &str, right: &str) -> bool {
+pub(crate) fn constant_time_equal(left: &str, right: &str) -> bool {
     if left.len() != right.len() {
         return false;
     }
@@ -1129,6 +1404,48 @@ mod tests {
     use chrono::Duration;
 
     use super::*;
+
+    #[test]
+    fn v4_migration_preserves_existing_data_and_scopes_alert_uniqueness() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE nodes(id TEXT PRIMARY KEY);
+            CREATE TABLE metrics(id INTEGER PRIMARY KEY, node_id TEXT, received_at TEXT);
+            CREATE TABLE alerts(id INTEGER PRIMARY KEY, node_id TEXT, kind TEXT, active INTEGER);
+            CREATE UNIQUE INDEX alerts_one_active_kind_idx ON alerts(node_id, kind) WHERE active=1;
+            INSERT INTO nodes(id) VALUES('existing');
+            INSERT INTO metrics(id,node_id,received_at) VALUES(1,'existing','2026-01-01T00:00:00.000Z');
+            INSERT INTO alerts(id,node_id,kind,active) VALUES(1,'existing','cpu',1);
+            PRAGMA user_version=4;").unwrap();
+        migrate(&connection).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM metrics", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT subject_id FROM alerts WHERE id=1", [], |row| row
+                    .get::<_, String>(
+                    0
+                ))
+                .unwrap(),
+            ""
+        );
+        connection.execute("INSERT INTO alerts(node_id,kind,active,subject_id) VALUES('existing','service',1,'one')", []).unwrap();
+        connection.execute("INSERT INTO alerts(node_id,kind,active,subject_id) VALUES('existing','service',1,'two')", []).unwrap();
+        assert!(connection.execute("INSERT INTO alerts(node_id,kind,active,subject_id) VALUES('existing','service',1,'one')", []).is_err());
+        migrate(&connection).unwrap();
+        connection.pragma_update(None, "user_version", 6).unwrap();
+        assert!(migrate(&connection).is_err());
+    }
 
     #[test]
     fn history_downsampling_bounds_output_and_keeps_latest_sample() {

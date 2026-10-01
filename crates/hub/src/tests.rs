@@ -6,7 +6,10 @@ use axum::{
 use chrono::Utc;
 use http_body_util::BodyExt;
 use pinglake_protocol::{
-    AlertKind, AlertRecord, AlertSettings, EnrollRequest, HistoryPoint, MetricReport, NodeSnapshot,
+    AlertKind, AlertRecord, AlertSettings, CpuCore, EnrollRequest, HistoryPoint, HostGroup,
+    MetricReport, MetricStatus, MonitoringData, MonitoringHistoryPoint, NodeMonitoringConfig,
+    NodeSnapshot, ProbeKind, ProbeResult, ProbeStatistics, ProbeStatus, ProbeTarget, ServiceCheck,
+    ServiceResult,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -86,17 +89,19 @@ struct TestContext {
     _directory: TempDir,
     database_path: std::path::PathBuf,
     app: Router,
+    state: super::AppState,
 }
 
 impl TestContext {
     fn new() -> Self {
         let directory = tempfile::tempdir().expect("tempdir");
         let database_path = directory.path().join("pinglake.db");
-        let (app, _) = build_app(Config::for_test(database_path.clone())).expect("build app");
+        let (app, state) = build_app(Config::for_test(database_path.clone())).expect("build app");
         Self {
             _directory: directory,
             database_path,
             app,
+            state,
         }
     }
 
@@ -527,6 +532,723 @@ async fn threshold_alerts_are_deduplicated_and_recover() {
     assert!(alerts[0].resolved_at.is_some());
 }
 
+#[tokio::test]
+async fn monitoring_config_is_scoped_versioned_and_allows_only_precise_https_origins() {
+    let context = TestContext::new();
+    let id = Uuid::new_v4();
+    enroll_monitoring_node(&context, id).await;
+    let cookie = context.login().await;
+    let path = format!("/api/v1/nodes/{id}/monitoring");
+    assert_eq!(
+        send_empty(&context.app, Method::GET, &path, &[])
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let config = NodeMonitoringConfig {
+        browser_latency_url: Some("https://node.example.com:8443/ping".into()),
+        ..Default::default()
+    };
+    let saved = send_serialized(
+        &context.app,
+        Method::PUT,
+        &path,
+        &[("cookie", &cookie)],
+        &config,
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let csp = saved.headers()["content-security-policy"].to_str().unwrap();
+    assert!(csp.contains("connect-src 'self' https://node.example.com:8443;"));
+    assert!(!csp.contains("connect-src *"));
+    let first: NodeMonitoringConfig = response_json(saved).await;
+    assert_eq!(first.revision, 1);
+    let second: NodeMonitoringConfig = response_json(
+        send_serialized(
+            &context.app,
+            Method::PUT,
+            &path,
+            &[("cookie", &cookie)],
+            &first,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(second.revision, 2);
+    let mut stale = first.clone();
+    stale.browser_latency_url = Some("https://stale.example.com/ping".into());
+    assert_eq!(
+        send_serialized(
+            &context.app,
+            Method::PUT,
+            &path,
+            &[("cookie", &cookie)],
+            &stale
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    let conflict = context
+        .state
+        .inner
+        .database
+        .save_monitoring_config(id, stale)
+        .unwrap_err();
+    assert!(conflict.is::<super::monitoring::MonitoringRevisionConflict>());
+    let latest: NodeMonitoringConfig =
+        response_json(send_empty(&context.app, Method::GET, &path, &[("cookie", &cookie)]).await)
+            .await;
+    assert_eq!(latest.revision, second.revision);
+    assert_eq!(latest.browser_latency_url, second.browser_latency_url);
+    let connection = rusqlite::Connection::open(&context.database_path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM monitoring_configs", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    let id_text = id.to_string();
+    let own: NodeMonitoringConfig = response_json(
+        send_empty(
+            &context.app,
+            Method::GET,
+            "/api/v1/agent/config",
+            &[
+                ("x-agent-id", &id_text),
+                ("authorization", "Bearer correct-secret"),
+            ],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(own.revision, 2);
+    assert_eq!(
+        send_empty(
+            &context.app,
+            Method::GET,
+            "/api/v1/agent/config",
+            &[
+                ("x-agent-id", &id_text),
+                ("authorization", "Bearer wrong-secret")
+            ]
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let missing = format!("/api/v1/nodes/{}/monitoring", Uuid::new_v4());
+    assert_eq!(
+        send_empty(&context.app, Method::GET, &missing, &[("cookie", &cookie)])
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let mut invalid = first.clone();
+    invalid.browser_latency_url = Some("https://user:secret@example.com/ping".into());
+    assert_eq!(
+        send_serialized(
+            &context.app,
+            Method::PUT,
+            &path,
+            &[("cookie", &cookie)],
+            &invalid
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let nodes: Vec<NodeSnapshot> = response_json(
+        send_empty(
+            &context.app,
+            Method::GET,
+            "/api/v1/nodes",
+            &[("cookie", &cookie)],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(nodes[0].browser_latency_url, first.browser_latency_url);
+}
+
+#[tokio::test]
+async fn concurrent_monitoring_config_writes_commit_only_one_revision() {
+    let context = TestContext::new();
+    let id = Uuid::new_v4();
+    enroll_monitoring_node(&context, id).await;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let first_state = context.state.clone();
+    let first_barrier = barrier.clone();
+    let second_state = context.state.clone();
+    let first = tokio::task::spawn_blocking(move || {
+        first_barrier.wait();
+        first_state.inner.database.save_monitoring_config(
+            id,
+            NodeMonitoringConfig {
+                browser_latency_url: Some("https://first.example.com/ping".into()),
+                ..Default::default()
+            },
+        )
+    });
+    let second = tokio::task::spawn_blocking(move || {
+        barrier.wait();
+        second_state.inner.database.save_monitoring_config(
+            id,
+            NodeMonitoringConfig {
+                browser_latency_url: Some("https://second.example.com/ping".into()),
+                ..Default::default()
+            },
+        )
+    });
+    let outcomes = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome
+                .as_ref()
+                .is_err_and(|error| error.is::<super::monitoring::MonitoringRevisionConflict>()))
+            .count(),
+        1
+    );
+    let latest = context
+        .state
+        .inner
+        .database
+        .monitoring_config(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.revision, 1);
+    assert!(
+        latest.browser_latency_url == Some("https://first.example.com/ping".into())
+            || latest.browser_latency_url == Some("https://second.example.com/ping".into())
+    );
+}
+
+#[tokio::test]
+async fn extended_samples_and_probe_ids_are_deduplicated_with_scoped_history() {
+    let context = TestContext::new();
+    let id = Uuid::new_v4();
+    enroll_monitoring_node(&context, id).await;
+    let cookie = context.login().await;
+    let target_id = Uuid::new_v4();
+    let config = NodeMonitoringConfig {
+        probes: vec![ProbeTarget {
+            id: target_id,
+            name: "HTTPS".into(),
+            kind: ProbeKind::Http,
+            target: "https://example.com/".into(),
+            port: None,
+            enabled: true,
+            interval_secs: 30,
+            timeout_ms: 5000,
+            expected_status: Some(200),
+            response_contains: None,
+        }],
+        ..Default::default()
+    };
+    let saved: NodeMonitoringConfig = response_json(
+        send_serialized(
+            &context.app,
+            Method::PUT,
+            &format!("/api/v1/nodes/{id}/monitoring"),
+            &[("cookie", &cookie)],
+            &config,
+        )
+        .await,
+    )
+    .await;
+    let mut report = metric_report();
+    report.collected_at = Utc::now() - chrono::Duration::seconds(30);
+    let at = Utc::now();
+    report.monitoring = Some(MonitoringData {
+        schema_version: 1,
+        session_id: Uuid::new_v4(),
+        sample_sequence: 1,
+        report_interval_secs: 5,
+        cpu_cores: vec![CpuCore {
+            id: "0".into(),
+            usage_percent: 42.0,
+            frequency_mhz: Some(3000),
+        }],
+        probes: vec![ProbeResult {
+            sample_id: Uuid::new_v4(),
+            target_id,
+            config_revision: saved.revision,
+            kind: ProbeKind::Http,
+            scheduled_at: at,
+            completed_at: at,
+            status: ProbeStatus::Success,
+            latency_ms: Some(42.0),
+            http_status: Some(200),
+            error: None,
+        }],
+        ..Default::default()
+    });
+    let id_text = id.to_string();
+    let headers = [
+        ("x-agent-id", id_text.as_str()),
+        ("authorization", "Bearer correct-secret"),
+    ];
+    for _ in 0..2 {
+        assert_eq!(
+            send_serialized(
+                &context.app,
+                Method::POST,
+                "/api/v1/agent/metrics",
+                &headers,
+                &report
+            )
+            .await
+            .status(),
+            StatusCode::ACCEPTED
+        );
+    }
+    report.monitoring.as_mut().unwrap().sample_sequence = 2;
+    assert_eq!(
+        send_serialized(
+            &context.app,
+            Method::POST,
+            "/api/v1/agent/metrics",
+            &headers,
+            &report
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    let connection = rusqlite::Connection::open(&context.database_path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM probe_samples", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let statistics: Vec<ProbeStatistics> = response_json(
+        send_empty(
+            &context.app,
+            Method::GET,
+            &format!("/api/v1/nodes/{id}/probes/statistics?minutes=60"),
+            &[("cookie", &cookie)],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(statistics.len(), 1);
+    assert_eq!(statistics[0].successful, 1);
+    assert_eq!(statistics[0].p95_ms, Some(42.0));
+    let points: Vec<MonitoringHistoryPoint> = response_json(
+        send_empty(
+            &context.app,
+            Method::GET,
+            &format!("/api/v1/nodes/{id}/monitoring/history?section=cpu&device=0"),
+            &[("cookie", &cookie)],
+        )
+        .await,
+    )
+    .await;
+    assert!(!points.is_empty());
+    assert!(points.len() <= 240);
+    assert_eq!(points[0].monitoring.cpu_cores[0].usage_percent, 42.0);
+    assert!(points[0].monitoring.probes.is_empty());
+    assert!(points[0].received_at > points[0].collected_at + chrono::Duration::seconds(29));
+    let probe_points: Vec<MonitoringHistoryPoint> = response_json(
+        send_empty(
+            &context.app,
+            Method::GET,
+            &format!("/api/v1/nodes/{id}/monitoring/history?section=probes&device={target_id}"),
+            &[("cookie", &cookie)],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(probe_points.len(), 1);
+    report.monitoring.as_mut().unwrap().probes[0].target_id = Uuid::new_v4();
+    report.monitoring.as_mut().unwrap().sample_sequence = 3;
+    assert_eq!(
+        send_serialized(
+            &context.app,
+            Method::POST,
+            "/api/v1/agent/metrics",
+            &headers,
+            &report
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        send_empty(
+            &context.app,
+            Method::GET,
+            &format!("/api/v1/nodes/{id}/monitoring/history?section=invalid"),
+            &[("cookie", &cookie)]
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn deleting_groups_preserves_nodes_and_metric_history() {
+    let context = TestContext::new();
+    let id = Uuid::new_v4();
+    enroll_monitoring_node(&context, id).await;
+    let cookie = context.login().await;
+    let mut events = context.state.inner.events.subscribe();
+    let group: HostGroup = response_json(
+        send_json(
+            &context.app,
+            Method::POST,
+            "/api/v1/groups",
+            &[("cookie", &cookie)],
+            json!({"name":"Group"}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        send_json(
+            &context.app,
+            Method::PUT,
+            &format!("/api/v1/nodes/{id}/group"),
+            &[("cookie", &cookie)],
+            json!({"group_id":group.id})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let id_text = id.to_string();
+    assert_eq!(
+        send_serialized(
+            &context.app,
+            Method::POST,
+            "/api/v1/agent/metrics",
+            &[
+                ("x-agent-id", &id_text),
+                ("authorization", "Bearer correct-secret")
+            ],
+            &metric_report()
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    let path = format!("/api/v1/groups/{}", group.id);
+    assert_eq!(
+        send_empty(&context.app, Method::DELETE, &path, &[])
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send_empty(&context.app, Method::DELETE, &path, &[("cookie", &cookie)])
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        send_empty(&context.app, Method::DELETE, &path, &[("cookie", &cookie)])
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let nodes: Vec<NodeSnapshot> = response_json(
+        send_empty(
+            &context.app,
+            Method::GET,
+            "/api/v1/nodes",
+            &[("cookie", &cookie)],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].group_id, None);
+    assert!(nodes[0].latest.is_some());
+    let history: Vec<HistoryPoint> = response_json(
+        send_empty(
+            &context.app,
+            Method::GET,
+            &format!("/api/v1/nodes/{id}/history"),
+            &[("cookie", &cookie)],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(history.len(), 1);
+    let mut group_removed = false;
+    let mut node_ungrouped = false;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            pinglake_protocol::LiveEvent::GroupsChanged(groups) if groups.is_empty() => {
+                group_removed = true
+            }
+            pinglake_protocol::LiveEvent::Snapshot(node)
+                if node.id == id && node.group_id.is_none() =>
+            {
+                node_ungrouped = true
+            }
+            _ => {}
+        }
+    }
+    assert!(group_removed && node_ungrouped);
+}
+
+#[tokio::test]
+async fn monitoring_retention_preserves_the_configuration_baseline() {
+    let context = TestContext::new();
+    let id = Uuid::new_v4();
+    enroll_monitoring_node(&context, id).await;
+    let cookie = context.login().await;
+    let path = format!("/api/v1/nodes/{id}/monitoring");
+    for _ in 0..3 {
+        let current: NodeMonitoringConfig = response_json(
+            send_empty(&context.app, Method::GET, &path, &[("cookie", &cookie)]).await,
+        )
+        .await;
+        assert_eq!(
+            send_serialized(
+                &context.app,
+                Method::PUT,
+                &path,
+                &[("cookie", &cookie)],
+                &current
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
+    let id_text = id.to_string();
+    assert_eq!(
+        send_serialized(
+            &context.app,
+            Method::POST,
+            "/api/v1/agent/metrics",
+            &[
+                ("x-agent-id", &id_text),
+                ("authorization", "Bearer correct-secret")
+            ],
+            &metric_report()
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    let connection = rusqlite::Connection::open(&context.database_path).unwrap();
+    let old = (Utc::now() - chrono::Duration::days(8)).to_rfc3339();
+    connection
+        .execute("UPDATE metrics SET received_at=?1", [&old])
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE monitoring_configs SET effective_at=?1 WHERE revision IN (1,2)",
+            [&old],
+        )
+        .unwrap();
+    connection.execute("INSERT INTO probe_samples(node_id,sample_id,target_id,config_revision,scheduled_at,received_at,result_json) VALUES(?1,'old','target',1,?2,?2,'{}')", rusqlite::params![id_text, old]).unwrap();
+    connection.execute("INSERT INTO service_samples(node_id,subject_id,config_revision,checked_at,received_at,result_json) VALUES(?1,'old',1,?2,?2,'{}')", rusqlite::params![id_text, old]).unwrap();
+    assert_eq!(
+        context.state.inner.database.cleanup_old_metrics().unwrap(),
+        1
+    );
+    for table in ["metrics", "probe_samples", "service_samples"] {
+        assert_eq!(
+            connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    let mut statement = connection
+        .prepare("SELECT revision FROM monitoring_configs ORDER BY revision")
+        .unwrap();
+    let revisions = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(revisions, vec![2, 3]);
+}
+
+#[tokio::test]
+async fn service_alert_subjects_recover_independently_and_unknown_is_not_recovery() {
+    let context = TestContext::new();
+    let id = Uuid::new_v4();
+    enroll_monitoring_node(&context, id).await;
+    let cookie = context.login().await;
+    let settings = AlertSettings {
+        sustained_for_seconds: 0,
+        ..Default::default()
+    };
+    assert_eq!(
+        send_serialized(
+            &context.app,
+            Method::PUT,
+            "/api/v1/settings",
+            &[("cookie", &cookie)],
+            &settings
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let config = NodeMonitoringConfig {
+        services: vec![
+            ServiceCheck {
+                id: first,
+                name: "first.service".into(),
+                enabled: true,
+                expected_state: "running".into(),
+            },
+            ServiceCheck {
+                id: second,
+                name: "second.service".into(),
+                enabled: true,
+                expected_state: "running".into(),
+            },
+        ],
+        ..Default::default()
+    };
+    let saved: NodeMonitoringConfig = response_json(
+        send_serialized(
+            &context.app,
+            Method::PUT,
+            &format!("/api/v1/nodes/{id}/monitoring"),
+            &[("cookie", &cookie)],
+            &config,
+        )
+        .await,
+    )
+    .await;
+    let mut report = metric_report();
+    let at = Utc::now() - chrono::Duration::seconds(10);
+    report.monitoring = Some(MonitoringData {
+        session_id: Uuid::new_v4(),
+        sample_sequence: 1,
+        report_interval_secs: 5,
+        services: saved
+            .services
+            .iter()
+            .map(|check| ServiceResult {
+                id: check.id,
+                name: check.name.clone(),
+                checked_at: at,
+                status: MetricStatus::Ok,
+                state: "stopped".into(),
+                healthy: Some(false),
+                error: None,
+                config_revision: saved.revision,
+            })
+            .collect(),
+        ..Default::default()
+    });
+    let id_text = id.to_string();
+    let headers = [
+        ("x-agent-id", id_text.as_str()),
+        ("authorization", "Bearer correct-secret"),
+    ];
+    assert_eq!(
+        send_serialized(
+            &context.app,
+            Method::POST,
+            "/api/v1/agent/metrics",
+            &headers,
+            &report
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    let alerts: Vec<AlertRecord> = response_json(
+        send_empty(
+            &context.app,
+            Method::GET,
+            "/api/v1/alerts",
+            &[("cookie", &cookie)],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(alerts.len(), 2);
+    assert!(
+        alerts
+            .iter()
+            .all(|alert| alert.active && matches!(alert.kind, AlertKind::Service))
+    );
+    let data = report.monitoring.as_mut().unwrap();
+    data.sample_sequence = 2;
+    data.services[0].checked_at = at + chrono::Duration::seconds(1);
+    data.services[0].status = MetricStatus::PermissionDenied;
+    data.services[0].healthy = None;
+    data.services[1].checked_at = at + chrono::Duration::seconds(1);
+    data.services[1].state = "running".into();
+    data.services[1].healthy = Some(true);
+    assert_eq!(
+        send_serialized(
+            &context.app,
+            Method::POST,
+            "/api/v1/agent/metrics",
+            &headers,
+            &report
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    let alerts: Vec<AlertRecord> = response_json(
+        send_empty(
+            &context.app,
+            Method::GET,
+            "/api/v1/alerts",
+            &[("cookie", &cookie)],
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        alerts
+            .iter()
+            .find(|alert| alert.subject_id.as_deref() == Some(&first.to_string()))
+            .unwrap()
+            .active
+    );
+    assert!(
+        !alerts
+            .iter()
+            .find(|alert| alert.subject_id.as_deref() == Some(&second.to_string()))
+            .unwrap()
+            .active
+    );
+}
+
+async fn enroll_monitoring_node(context: &TestContext, id: Uuid) {
+    let response = send_serialized(
+        &context.app,
+        Method::POST,
+        "/api/v1/agent/enroll",
+        &[("x-enrollment-token", "test-enrollment-token")],
+        &enroll_request(id, "correct-secret"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 fn enroll_request(agent_id: Uuid, agent_secret: &str) -> EnrollRequest {
     EnrollRequest {
         agent_id,
@@ -543,6 +1265,7 @@ fn enroll_request(agent_id: Uuid, agent_secret: &str) -> EnrollRequest {
 
 fn metric_report() -> MetricReport {
     MetricReport {
+        monitoring: None,
         collected_at: Utc::now(),
         cpu_percent: 42.5,
         memory_used_bytes: 4 * 1024 * 1024,

@@ -155,6 +155,10 @@ export function useMonitoring(authenticated: boolean, onUnauthorized: () => void
         };
       }
 
+      if (event.type === "groups_changed") {
+        const ids = new Set(event.payload.map((group) => group.id));
+        return { ...current, groups: event.payload, nodes: current.nodes.map((node) => node.group_id && !ids.has(node.group_id) ? { ...node, group_id: null, group_name: null } : node), lastUpdated: new Date() };
+      }
       return { ...current, settings: event.payload, lastUpdated: new Date() };
     });
   }, []);
@@ -276,7 +280,8 @@ export function useMonitoring(authenticated: boolean, onUnauthorized: () => void
     async (name: string) => {
       try {
         const group = await api.createGroup(name);
-        setState((current) => ({ ...current, groups: [...current.groups, group].sort((left, right) => left.name.localeCompare(right.name)) }));
+        liveRevision.current += 1;
+        setState((current) => ({ ...current, groups: [...current.groups.filter((item) => item.id !== group.id), group].sort((left, right) => left.name.localeCompare(right.name)) }));
         return group;
       } catch (error) {
         handleError(error);
@@ -290,6 +295,7 @@ export function useMonitoring(authenticated: boolean, onUnauthorized: () => void
     async (nodeId: string, groupId: string | null) => {
       try {
         const snapshot = await api.assignNodeGroup(nodeId, groupId);
+        liveRevision.current += 1;
         setState((current) => ({
           ...current,
           nodes: current.nodes.map((node) => node.id === nodeId ? snapshot : node),
@@ -326,5 +332,13 @@ export function useMonitoring(authenticated: boolean, onUnauthorized: () => void
     setState((current) => ({ ...current, error: null }));
   }, []);
 
-  return { ...state, refresh, saveSettings, deleteNode, createGroup, assignNodeGroup, renameNode, dismissError };
+  const deleteGroup = useCallback(async (id: string) => {
+    try {
+      await api.deleteGroup(id);
+      liveRevision.current += 1;
+      setState((current) => ({ ...current, groups: current.groups.filter((group) => group.id !== id), nodes: current.nodes.map((node) => node.group_id === id ? { ...node, group_id: null, group_name: null } : node) }));
+    } catch (error) { handleError(error); throw error; }
+  }, [handleError]);
+
+  return { ...state, refresh, saveSettings, deleteNode, createGroup, deleteGroup, assignNodeGroup, renameNode, dismissError };
 }
