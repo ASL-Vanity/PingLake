@@ -254,6 +254,11 @@ async fn execute(
         ProbeKind::Icmp => icmp(addresses[0].ip(), target.timeout_ms)
             .await
             .map(|ms| (ms, None)),
+        ProbeKind::Dns | ProbeKind::Process | ProbeKind::LocalPort => Err((
+            ProbeStatus::Unsupported,
+            "probe kind is not implemented by this Agent".into(),
+            None,
+        )),
     }
 }
 

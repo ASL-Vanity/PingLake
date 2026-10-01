@@ -706,6 +706,15 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
                     return Err(invalid("TCP probe requires a port"));
                 }
             }
+            // The protocol reserves these kinds for Agents that implement the
+            // corresponding extension. Older Hubs persist and relay them;
+            // execution support is intentionally outside this module.
+            ProbeKind::Dns | ProbeKind::Process | ProbeKind::LocalPort => {
+                bounded(&probe.target, 253, true)?;
+                if probe.kind == ProbeKind::LocalPort && probe.port.is_none() {
+                    return Err(invalid("local port probe requires a port"));
+                }
+            }
         }
     }
     Ok(())

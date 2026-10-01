@@ -16,6 +16,28 @@ pub enum MetricStatus {
     Stale,
 }
 
+/// Status vocabulary shared by every active check.  `MetricStatus` remains the
+/// status used by resource metrics and capabilities; this type adds the
+/// check-specific policy outcome while keeping the same wire spellings for
+/// the common states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Ok,
+    WarmingUp,
+    Unsupported,
+    PermissionDenied,
+    Unavailable,
+    Stale,
+    PolicyDenied,
+}
+
+impl Default for CheckStatus {
+    fn default() -> Self {
+        Self::Unavailable
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Capability {
@@ -153,10 +175,18 @@ pub struct MonitoringData {
     pub agent: AgentHealth,
     pub services: Vec<ServiceResult>,
     pub probes: Vec<ProbeResult>,
+    /// Optional extension checks.  These fields default to empty so reports
+    /// produced by older Agents remain valid.
+    #[serde(default)]
+    pub dns_checks: Vec<DnsResult>,
+    #[serde(default)]
+    pub process_checks: Vec<ProcessResult>,
+    #[serde(default)]
+    pub local_port_checks: Vec<LocalPortResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default)]
 pub struct ServiceCheck {
     pub id: Uuid,
     pub name: String,
@@ -165,6 +195,105 @@ pub struct ServiceCheck {
     #[serde(default = "running")]
     pub expected_state: String,
 }
+
+impl Default for ServiceCheck {
+    fn default() -> Self {
+        Self {
+            id: Uuid::nil(),
+            name: String::new(),
+            enabled: true,
+            expected_state: running(),
+        }
+    }
+}
+
+/// A DNS lookup check. `record_type` is intentionally a string so Agents can
+/// add record types without making old Hub binaries reject the configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DnsCheck {
+    pub id: Uuid,
+    pub name: String,
+    pub hostname: String,
+    pub record_type: String,
+    pub expected_value: Option<String>,
+    pub enabled: bool,
+    pub interval_secs: u64,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DnsResult {
+    pub id: Uuid,
+    pub name: String,
+    pub checked_at: Option<DateTime<Utc>>,
+    pub status: CheckStatus,
+    pub hostname: String,
+    pub record_type: String,
+    pub answers: Vec<String>,
+    pub latency_ms: Option<f64>,
+    pub error: Option<String>,
+}
+
+/// A process existence/health check, identified by a stable process name or
+/// executable pattern. The protocol does not prescribe how an Agent locates
+/// processes on a platform.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcessCheck {
+    pub id: Uuid,
+    pub name: String,
+    pub process_name: String,
+    pub expected_count: Option<u32>,
+    pub enabled: bool,
+    pub interval_secs: u64,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcessResult {
+    pub id: Uuid,
+    pub name: String,
+    pub checked_at: Option<DateTime<Utc>>,
+    pub status: CheckStatus,
+    pub process_name: String,
+    pub count: Option<u32>,
+    pub expected_count: Option<u32>,
+    pub error: Option<String>,
+}
+
+/// A local listening-port check. `address` defaults to loopback semantics at
+/// the Agent and is carried explicitly when a platform exposes a bind address.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalPortCheck {
+    pub id: Uuid,
+    pub name: String,
+    pub address: Option<String>,
+    pub port: u16,
+    pub enabled: bool,
+    pub interval_secs: u64,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalPortResult {
+    pub id: Uuid,
+    pub name: String,
+    pub checked_at: Option<DateTime<Utc>>,
+    pub status: CheckStatus,
+    pub address: Option<String>,
+    pub port: u16,
+    pub latency_ms: Option<f64>,
+    pub error: Option<String>,
+}
+
+/// Short aliases used by clients that call this check simply a port check.
+pub type PortCheck = LocalPortCheck;
+pub type PortResult = LocalPortResult;
 
 fn enabled() -> bool {
     true
@@ -182,13 +311,23 @@ fn timeout() -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeKind {
+    #[serde(rename = "icmp")]
     Icmp,
     Tcp,
     Http,
+    Dns,
+    Process,
+    LocalPort,
+}
+
+impl Default for ProbeKind {
+    fn default() -> Self {
+        Self::Icmp
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default)]
 pub struct ProbeTarget {
     pub id: Uuid,
     pub name: String,
@@ -205,13 +344,36 @@ pub struct ProbeTarget {
     pub response_contains: Option<String>,
 }
 
+impl Default for ProbeTarget {
+    fn default() -> Self {
+        Self {
+            id: Uuid::nil(),
+            name: String::new(),
+            kind: ProbeKind::default(),
+            target: String::new(),
+            port: None,
+            enabled: enabled(),
+            interval_secs: interval(),
+            timeout_ms: timeout(),
+            expected_status: None,
+            response_contains: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct NodeMonitoringConfig {
     pub revision: u64,
     pub browser_latency_url: Option<String>,
     pub services: Vec<ServiceCheck>,
     pub probes: Vec<ProbeTarget>,
+    #[serde(default)]
+    pub dns_checks: Vec<DnsCheck>,
+    #[serde(default)]
+    pub process_checks: Vec<ProcessCheck>,
+    #[serde(default)]
+    pub local_port_checks: Vec<LocalPortCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +397,24 @@ pub enum ProbeStatus {
     PermissionDenied,
     Unsupported,
     PolicyDenied,
+    WarmingUp,
+    Unavailable,
+    Stale,
+}
+
+impl From<ProbeStatus> for CheckStatus {
+    fn from(value: ProbeStatus) -> Self {
+        match value {
+            ProbeStatus::Success => Self::Ok,
+            ProbeStatus::PermissionDenied => Self::PermissionDenied,
+            ProbeStatus::Unsupported => Self::Unsupported,
+            ProbeStatus::PolicyDenied => Self::PolicyDenied,
+            ProbeStatus::Timeout | ProbeStatus::Failure => Self::Unavailable,
+            ProbeStatus::WarmingUp => Self::WarmingUp,
+            ProbeStatus::Unavailable => Self::Unavailable,
+            ProbeStatus::Stale => Self::Stale,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,5 +495,60 @@ mod tests {
         let report: crate::MetricReport = serde_json::from_value(value).unwrap();
         assert!(report.monitoring.is_none());
         assert_eq!(report.cpu_percent, 12.0);
+    }
+
+    #[test]
+    fn v2_checks_use_shared_status_and_allow_future_fields() {
+        let value = serde_json::json!({
+            "revision": 4,
+            "services": [],
+            "probes": [{
+                "id": Uuid::nil(), "name": "dns", "kind": "dns",
+                "target": "example.test", "enabled": true,
+                "future_probe_option": "ignored"
+            }],
+            "dns_checks": [{
+                "id": Uuid::nil(), "name": "authoritative",
+                "hostname": "example.test", "record_type": "A",
+                "status_hint": "future"
+            }],
+            "process_checks": [{
+                "id": Uuid::nil(), "name": "worker", "process_name": "worker.exe"
+            }],
+            "local_port_checks": [{
+                "id": Uuid::nil(), "name": "http", "port": 8080
+            }],
+            "future_section": true
+        });
+        let config: NodeMonitoringConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(config.probes[0].kind, ProbeKind::Dns);
+        assert_eq!(config.dns_checks[0].record_type, "A");
+        assert_eq!(
+            CheckStatus::from(ProbeStatus::Timeout),
+            CheckStatus::Unavailable
+        );
+        assert_eq!(
+            CheckStatus::from(ProbeStatus::PolicyDenied),
+            CheckStatus::PolicyDenied
+        );
+    }
+
+    #[test]
+    fn new_result_fields_are_optional_for_old_stored_json() {
+        let result: DnsResult =
+            serde_json::from_str(r#"{"id":"00000000-0000-0000-0000-000000000000","name":"dns"}"#)
+                .unwrap();
+        assert_eq!(result.status, CheckStatus::Unavailable);
+        assert!(result.answers.is_empty());
+    }
+
+    #[test]
+    fn v2_fixture_is_wire_compatible() {
+        let data: MonitoringData =
+            serde_json::from_str(include_str!("../fixtures/monitoring-v2.json")).unwrap();
+        assert_eq!(data.schema_version, 2);
+        assert_eq!(data.dns_checks[0].status, CheckStatus::Ok);
+        assert_eq!(data.process_checks[0].status, CheckStatus::PermissionDenied);
+        assert_eq!(data.local_port_checks[0].status, CheckStatus::Unavailable);
     }
 }

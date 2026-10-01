@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "session_id": "00000000-0000-0000-0000-000000000001",
+  "sample_sequence": 7,
+  "capabilities": {},
+  "dns_checks": [{
+    "id": "00000000-0000-0000-0000-000000000002",
+    "name": "public-dns",
+    "hostname": "example.test",
+    "record_type": "A",
+    "status": "ok",
+    "answers": ["192.0.2.1"]
+  }],
+  "process_checks": [{
+    "id": "00000000-0000-0000-0000-000000000003",
+    "name": "worker",
+    "process_name": "worker",
+    "status": "permission_denied"
+  }],
+  "local_port_checks": [{
+    "id": "00000000-0000-0000-0000-000000000004",
+    "name": "local-http",
+    "port": 8080,
+    "status": "unavailable"
+  }]
+}
