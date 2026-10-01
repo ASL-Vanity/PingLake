@@ -31,8 +31,9 @@ iteration. Existing process Top metrics and basic alerts remain supported.
 
 - Workspace consists of protocol, Agent, Hub and React Web modules.
 - Agent reports every five seconds by default and uses sysinfo 0.37.
-- Upload backoff currently blocks further collection; scheduling must change.
-- SQLite schema version is 4; raw metrics are retained for seven days.
+- Collection and upload are now independent; the bounded queue is persisted in
+  the Agent state directory and uses a 300-second sample-age limit.
+- SQLite schema version is 5; raw metrics are retained for seven days.
 - Existing history returns at most 1,440 points after loading matching rows.
 - History currently labels Hub receipt time as collected_at. Keep query windows
   based on Hub receipt time, but expose collection and receipt times distinctly.
@@ -119,9 +120,10 @@ when the service account or network namespace limits visibility.
   established ICMP implementation; do not hand-write the protocol engine.
 - Separate host collection, service checks, active probes and upload workers.
   Slow or failing probes cannot block five-second host collection.
-- Use a bounded upload queue with a documented drop policy and drop counters;
-  do not introduce unlimited offline buffering. Failed reports retain original
-  timestamps and identities; successful receipt does not make old data fresh.
+- Use a bounded, persisted upload queue with a documented drop policy and drop
+  counters; do not introduce unlimited offline buffering. Failed reports retain
+  original timestamps and identities; successful receipt does not make old data
+  fresh.
 - Counters describing the current upload outcome appear in a subsequent report.
   While offline, Hub derives missing reports from receipts; Agent local failure
   counters become observable after reconnection, not magically during outage.
@@ -236,8 +238,11 @@ when the service account or network namespace limits visibility.
 - [x] Scope confirmed: ten monitoring items, group deletion, browser-to-each-node latency.
 - [x] Read-only repository and platform/design assessment by three subagents.
 - [x] Development phases, responsibilities and acceptance gates prepared.
-- [x] Protocol/configuration contract frozen; compatible optional metrics and typed target configuration added.
-- [x] Implementation and automated local/lab verification.
+- [x] Protocol/configuration contract frozen with v1/v2 enrollment negotiation,
+      strict typed target validation and legacy downgrade behavior.
+- [x] Implementation and automated local/lab verification, including persisted
+      Agent queue recovery, schema compatibility, DNS/process/local-port results
+      and Web quality states.
 - [ ] Browser desktop/mobile visual and interaction checks (browser permission verification unavailable).
 - [ ] Real HTTPS browser-to-node measurement and Windows LocalService permission verification.
 - [ ] Deployment preparation and production rollout, when separately authorized.

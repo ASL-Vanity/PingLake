@@ -830,6 +830,50 @@ mod tests {
             17
         );
     }
+
+    #[test]
+    fn legacy_schema_downgrade_removes_v2_only_results() {
+        let mut data = MonitoringData {
+            schema_version: 2,
+            probes: vec![
+                ProbeResult {
+                    sample_id: Uuid::new_v4(),
+                    target_id: Uuid::new_v4(),
+                    config_revision: 1,
+                    kind: ProbeKind::Dns,
+                    scheduled_at: Utc::now(),
+                    completed_at: Utc::now(),
+                    status: pinglake_protocol::ProbeStatus::Success,
+                    latency_ms: Some(1.0),
+                    http_status: None,
+                    error: None,
+                },
+                ProbeResult {
+                    sample_id: Uuid::new_v4(),
+                    target_id: Uuid::new_v4(),
+                    config_revision: 1,
+                    kind: ProbeKind::Http,
+                    scheduled_at: Utc::now(),
+                    completed_at: Utc::now(),
+                    status: pinglake_protocol::ProbeStatus::Success,
+                    latency_ms: Some(1.0),
+                    http_status: Some(200),
+                    error: None,
+                },
+            ],
+            dns_checks: vec![DnsResult::default()],
+            process_checks: vec![ProcessResult::default()],
+            local_port_checks: vec![LocalPortResult::default()],
+            ..Default::default()
+        };
+        downgrade_monitoring_to_v1(&mut data);
+        assert_eq!(data.schema_version, 1);
+        assert_eq!(data.probes.len(), 1);
+        assert_eq!(data.probes[0].kind, ProbeKind::Http);
+        assert!(data.dns_checks.is_empty());
+        assert!(data.process_checks.is_empty());
+        assert!(data.local_port_checks.is_empty());
+    }
     #[test]
     fn success_rate_uses_last_hundred_real_upload_attempts() {
         let mut shared = Shared::default();

@@ -2,8 +2,9 @@
 
 The Hub remains compatible with original v1 Agents. New Agents add per-core
 CPU, available memory/swap IO, disk IO, inodes, interface errors/discards, TCP
-states, service checks, upload quality and ICMP/TCP/HTTP probes. Detailed
-history and probe statistics are available in the node detail tabs.
+states, service/process/port checks, upload quality and DNS/ICMP/TCP/HTTP
+probes. Detailed history and probe statistics are available in the node detail
+tabs.
 
 ## Platform semantics
 
@@ -33,8 +34,12 @@ Probe kinds have distinct meanings:
 - TCP: connection establishment to the configured host and port.
 - HTTP(S): time to response headers, or to the bounded response body when content
   matching is configured. Default expected status is 2xx; TLS validation stays on.
+- DNS: resolver lookup from the Agent without connecting to the returned address.
+- Process checks: read-only process-name existence and expected instance state.
+- Local port checks: read-only inspection of the local TCP listening table; the
+  result is scoped to the Agent's current network namespace.
 
-Each node permits at most 32 services and 32 probes. Probe intervals are
+Each node permits at most 32 checks of each kind. Probe intervals are
 10-86,400 seconds, with a default of 30 seconds. Timeouts are 1-10,000 ms and
 shorter than the interval. Four probes run concurrently, with fair scheduling.
 Excess demand is visible as reduced coverage rather than unlimited task buildup.
@@ -109,9 +114,12 @@ and are not accepted as global node health or SLA observations.
 
 ## Quality, buffering and history
 
-Collection and upload run independently. The in-memory upload queue holds 64
-reports, drops oldest queued reports on overflow and expires samples older than
-300 seconds. Drop counts are reported; this is not persistent offline archival.
+Collection and upload run independently. The Agent keeps a bounded queue of 64
+reports in memory and persists the pending reports in its state directory. It
+drops oldest queued reports on overflow and expires samples older than 300
+seconds. Queue corruption or an oversized queue is reported and the Agent
+starts with an empty queue; the Hub remains the source of truth for accepted
+reports.
 Detailed metrics are trimmed if needed to keep the report below the 256 KiB
 ingestion limit, with a visible report_budget capability warning.
 
@@ -119,6 +127,12 @@ Upload success rate uses the last 100 attempts, not only successful deliveries.
 The outcome of an upload appears in a subsequent report. During complete network
 failure, the Hub observes missing receipts; local failure counters become visible
 after reconnection. Collection/send durations and sample age are separate.
+
+New Agents negotiate the monitoring schema during enrollment. A Hub that does
+not advertise schema v2 receives v1-compatible reports and v1-compatible
+configuration; a v2 Hub accepts the extended DNS/process/local-port results.
+This allows the Hub to be upgraded before Agents without making an old Hub
+attempt to decode new probe kinds.
 
 Raw data stays for seven days. Detailed resource history returns at most 240
 time-bucket representative snapshots with a 4 MiB response limit; it is not a

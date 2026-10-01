@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { RefreshCw, Settings } from "lucide-react";
 import { api, ApiError } from "../api";
 import type { NodeSnapshot } from "../types";
-import type { MetricStatus, MonitoringData, MonitoringSection, NodeMonitoringConfig, ProbeStatistics, ProbeStatus } from "../monitoringTypes";
+import type { CheckStatus, MetricStatus, MonitoringData, MonitoringSection, NodeMonitoringConfig, ProbeStatistics, ProbeStatus } from "../monitoringTypes";
 import { formatBytes, formatDateTime, formatLatency, formatPercent, formatRate, formatRelativeTime } from "../utils";
 import { browserLatencyLabel, type BrowserLatency } from "../hooks/useBrowserLatency";
 import { MonitoringConfig } from "./MonitoringConfig";
@@ -10,7 +10,7 @@ import { MonitoringHistory } from "./MonitoringHistory";
 import { useHistoryRange } from "./HistoryRange";
 import { useHistoryQuery } from "../hooks/useHistoryQuery";
 
-const statusNames: Record<MetricStatus | ProbeStatus, string> = {
+const statusNames: Record<MetricStatus | ProbeStatus | CheckStatus, string> = {
   ok: "正常", warming_up: "初次采样", unsupported: "不支持", permission_denied: "权限不足", unavailable: "采集失败", stale: "已过期", unknown: "未知",
   success: "成功", failure: "失败", timeout: "超时", policy_denied: "策略禁止",
 };
@@ -34,7 +34,7 @@ function counter(value: string | null | undefined) {
   try { return BigInt(value).toLocaleString("zh-CN"); } catch { return "--"; }
 }
 function stateName(state: string) { return ({ running: "运行", stopped: "停止", unknown: "未知", inactive: "停止", failed: "失败", activating: "启动中", deactivating: "停止中" } as Record<string, string>)[state] ?? state; }
-function Badge({ status, error }: { status: MetricStatus | ProbeStatus; error?: string | null }) { return <span className={`monitoring-status ${status}`} title={error ?? undefined}>{statusNames[status] ?? status}</span>; }
+function Badge({ status, error }: { status: MetricStatus | ProbeStatus | CheckStatus; error?: string | null }) { return <span className={`monitoring-status ${status}`} title={error ?? undefined}>{statusNames[status] ?? status}</span>; }
 function Quantile({ value, count, minimum }: { value: number | null; count: number | null | undefined; minimum: number }) {
   const insufficient = count != null && count > 0 && count < minimum;
   return <>{formatLatency(value)}{count != null && <small className={`monitoring-quantile-count ${insufficient ? "small-sample" : ""}`} title={insufficient ? `${count} 个成功延迟样本，少于 ${minimum} 个样本；百分位对单次观测敏感。` : `${count} 个成功延迟样本`}>n={count}{insufficient ? " · 样本不足" : ""}</small>}</>;
@@ -145,10 +145,18 @@ function Services({ node, data, config, onUnauthorized }: { node: NodeSnapshot; 
   const nodeId = node.id;
   const now = useClock();
   const checks = config?.services ?? [];
+  const processChecks = config?.process_checks ?? [];
   return <><Capabilities data={data} names={["services"]} />{checks.length ? <Table headings={["服务", "启用", "预期", "状态", "检查结果", "最近检查", "错误"]}>{checks.map((check) => {
     const result = data.services.find((item) => item.id === check.id && item.config_revision === config?.revision);
     return <tr key={check.id}><th scope="row">{check.name}</th><td>{check.enabled ? "是" : "已暂停"}</td><td>{stateName(check.expected_state)}</td><td>{result ? stateName(result.state) : "--"}</td><td>{!check.enabled ? "已暂停" : result ? <Badge status={checkStale(node, result.checked_at, 30, now) ? "stale" : result.status !== "ok" ? result.status : result.healthy == null ? "unavailable" : result.healthy ? "ok" : "failure"} /> : "等待采样"}</td><td>{formatRelativeTime(result?.checked_at)}</td><td>{result?.error ?? "--"}</td></tr>;
-  })}</Table> : <p className="monitoring-empty">尚未配置服务</p>}{checks.length > 0 && <MonitoringHistory nodeId={nodeId} section="services" devices={checks.map((item) => ({ id: item.id, name: item.name }))} onUnauthorized={onUnauthorized} />}</>;
+  })}</Table> : <p className="monitoring-empty">尚未配置服务</p>}{checks.length > 0 && <MonitoringHistory nodeId={nodeId} section="services" devices={checks.map((item) => ({ id: item.id, name: item.name }))} onUnauthorized={onUnauthorized} />}
+    {processChecks.length > 0 && <><h3 className="monitoring-subheading">进程检查</h3><Table headings={["名称", "进程", "启用", "实例数", "结果", "最近检查", "错误"]}>{processChecks.map((check) => {
+      const result = data.process_checks?.find((item) => item.id === check.id && item.config_revision === config?.revision);
+      const fresh = checkStale(node, result?.checked_at ?? undefined, check.interval_secs, now);
+      const healthy = result?.status === "ok" ? (check.expected_count != null ? result.count === check.expected_count : check.expected_state === "running" ? (result.count ?? 0) > 0 : (result.count ?? 0) === 0) : null;
+      return <tr key={check.id}><th scope="row">{check.name}</th><td>{check.process_name}</td><td>{check.enabled ? "是" : "已暂停"}</td><td>{result?.count ?? "--"}</td><td>{!check.enabled ? "已暂停" : result ? <Badge status={fresh ? "stale" : result.status !== "ok" ? result.status : healthy ? "ok" : "failure"} error={result.error} /> : "等待采样"}</td><td>{formatRelativeTime(result?.checked_at ?? undefined)}</td><td>{result?.error ?? "--"}</td></tr>;
+    })}</Table></>}
+  </>;
 }
 
 function Probes({ node, data, config, onUnauthorized }: { node: NodeSnapshot; data?: MonitoringData | null; config: NodeMonitoringConfig | null; onUnauthorized: () => void }) {
@@ -160,6 +168,7 @@ function Probes({ node, data, config, onUnauthorized }: { node: NodeSnapshot; da
   const { data: stats, loading, error, refresh } = useHistoryQuery<ProbeStatistics[]>(`probes:${nodeId}:${minutes}:${config?.revision}`, fetcher, onUnauthorized, `probes:${nodeId}:${config?.revision}`, range?.refreshKey);
   const statistics = stats ?? [];
   const probes = config?.probes ?? [];
+  const localPorts = config?.local_port_checks ?? [];
   return <>{data && <Capabilities data={data} names={["probes"]} />}{probes.length ? <Table headings={["目标", "类型", "地址", "状态", "延迟", "HTTP", "最近检查", "错误"]}>{probes.map((target) => {
     const result = [...(data?.probes ?? [])].reverse().find((item) => item.target_id === target.id && item.config_revision === config?.revision);
     const stale = checkStale(node, result?.completed_at, target.interval_secs, now);
@@ -168,5 +177,10 @@ function Probes({ node, data, config, onUnauthorized }: { node: NodeSnapshot; da
     <div className="monitoring-section-toolbar"><h3>可用性 / 延迟统计</h3><button type="button" className="icon-button" title="刷新探测统计" aria-label="刷新探测统计" onClick={refresh}><RefreshCw size={15} className={loading ? "spin" : ""} /></button></div>
     {error ? <p className="form-error" role="alert">{error}</p> : loading ? <p className="monitoring-empty">载入统计中</p> : statistics.length ? <Table headings={["目标", "成功 / 失败 / 未知", "预期样本", "成功率", "可用率（已观测）", "覆盖率", "P50", "P95", "P99", "可用 / 观测 / 未知时长"]}>{statistics.map((item) => <tr key={item.target_id}><th scope="row">{item.name}</th><td>{item.successful} / {item.failed} / {item.unknown}</td><td>{item.expected}</td><td>{formatPercent(item.success_rate_percent, 2)}</td><td>{formatPercent(item.observed_seconds > 0 ? item.available_seconds * 100 / item.observed_seconds : null, 2)}</td><td>{formatPercent(item.coverage_percent, 2)}</td><td><Quantile value={item.p50_ms} count={item.latency_samples} minimum={2} /></td><td><Quantile value={item.p95_ms} count={item.latency_samples} minimum={20} /></td><td><Quantile value={item.p99_ms} count={item.latency_samples} minimum={100} /></td><td>{number(item.available_seconds, "s", 0)} / {number(item.observed_seconds, "s", 0)} / {number(item.unknown_seconds, "s", 0)}</td></tr>)}</Table> : <p className="monitoring-empty">所选范围内暂无探测统计</p>}
     {probes.length > 0 && <MonitoringHistory nodeId={nodeId} section="probes" devices={probes.map((item) => ({ id: item.id, name: item.name, intervalSecs: item.interval_secs }))} onUnauthorized={onUnauthorized} />}
+    {localPorts.length > 0 && <><h3 className="monitoring-subheading">本机端口</h3><Table headings={["名称", "端口", "启用", "状态", "最近检查", "错误"]}>{localPorts.map((check) => {
+      const result = data?.local_port_checks?.find((item) => item.id === check.id && item.config_revision === config?.revision);
+      const stale = checkStale(node, result?.checked_at ?? undefined, check.interval_secs, now);
+      return <tr key={check.id}><th scope="row">{check.name}</th><td>{check.port}</td><td>{check.enabled ? "是" : "已暂停"}</td><td>{!check.enabled ? "已暂停" : result ? <Badge status={stale ? "stale" : result.status} error={result.error} /> : "等待采样"}</td><td>{formatRelativeTime(result?.checked_at ?? undefined)}</td><td>{result?.error ?? "--"}</td></tr>;
+    })}</Table></>}
   </>;
 }

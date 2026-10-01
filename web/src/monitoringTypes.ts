@@ -35,17 +35,25 @@ export interface MonitoringData {
   disk_io: DiskIo[]; inodes: InodeMetric[]; network_health: NetworkHealth[];
   tcp: { states: Record<string, number>; listening_sockets: number; listening_ports: number; scope: string };
   agent: AgentHealth; services: ServiceResult[]; probes: ProbeResult[];
+  dns_checks?: DnsResult[]; process_checks?: ProcessResult[]; local_port_checks?: LocalPortResult[];
 }
 export interface ServiceCheck { id: string; name: string; enabled: boolean; expected_state: string }
-export type ProbeKind = "icmp" | "tcp" | "http";
+export type ProbeKind = "icmp" | "tcp" | "http" | "dns";
 export interface ProbeTarget {
   id: string; name: string; kind: ProbeKind; target: string; port: number | null; enabled: boolean;
   interval_secs: number; timeout_ms: number; expected_status: number | null; response_contains: string | null;
 }
-export interface NodeMonitoringConfig { revision: number; browser_latency_url: string | null; services: ServiceCheck[]; probes: ProbeTarget[] }
+export interface DnsCheck { id: string; name: string; hostname: string; record_type: "A" | "AAAA"; expected_value: string | null; enabled: boolean; interval_secs: number; timeout_ms: number }
+export interface ProcessCheck { id: string; name: string; process_name: string; expected_count: number | null; enabled: boolean; expected_state: string; interval_secs: number; timeout_ms: number }
+export interface LocalPortCheck { id: string; name: string; address: string | null; port: number; enabled: boolean; interval_secs: number; timeout_ms: number }
+export interface NodeMonitoringConfig { revision: number; browser_latency_url: string | null; services: ServiceCheck[]; probes: ProbeTarget[]; dns_checks?: DnsCheck[]; process_checks?: ProcessCheck[]; local_port_checks?: LocalPortCheck[] }
 export interface ServiceResult { id: string; name: string; checked_at: string; status: MetricStatus; state: string; healthy: boolean | null; error: string | null; config_revision: number }
-export type ProbeStatus = "success" | "failure" | "timeout" | "permission_denied" | "unsupported" | "policy_denied";
+export type CheckStatus = "ok" | "warming_up" | "unsupported" | "permission_denied" | "unavailable" | "stale" | "policy_denied";
+export type ProbeStatus = "success" | "failure" | "timeout" | "permission_denied" | "unsupported" | "policy_denied" | "warming_up" | "unavailable" | "stale";
 export interface ProbeResult { sample_id: string; target_id: string; config_revision: number; kind: ProbeKind; scheduled_at: string; completed_at: string; status: ProbeStatus; latency_ms: number | null; http_status: number | null; error: string | null }
+export interface DnsResult { id: string; name: string; sample_id: string; config_revision: number; scheduled_at: string | null; completed_at: string | null; checked_at: string | null; status: CheckStatus; hostname: string; record_type: string; answers: string[]; latency_ms: number | null; error: string | null; reason: string | null }
+export interface ProcessResult { id: string; name: string; sample_id: string; config_revision: number; scheduled_at: string | null; completed_at: string | null; checked_at: string | null; status: CheckStatus; process_name: string; count: number | null; expected_count: number | null; error: string | null; reason: string | null }
+export interface LocalPortResult { id: string; name: string; sample_id: string; config_revision: number; scheduled_at: string | null; completed_at: string | null; checked_at: string | null; status: CheckStatus; address: string | null; port: number; latency_ms: number | null; error: string | null; reason: string | null }
 export interface MonitoringHistoryPoint { collected_at: string; received_at: string; monitoring: MonitoringData }
 export interface ProbeStatistics {
   latency_samples?: number | null;
