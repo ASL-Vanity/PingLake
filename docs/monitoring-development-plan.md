@@ -33,7 +33,7 @@ iteration. Existing process Top metrics and basic alerts remain supported.
 - Agent reports every five seconds by default and uses sysinfo 0.37.
 - Collection and upload are now independent; the bounded queue is persisted in
   the Agent state directory and uses a 300-second sample-age limit.
-- SQLite schema version is 5; raw metrics are retained for seven days.
+- SQLite schema version is 6; raw metrics are retained for seven days.
 - Existing history returns at most 1,440 points after loading matching rows.
 - History currently labels Hub receipt time as collected_at. Keep query windows
   based on Hub receipt time, but expose collection and receipt times distinctly.
@@ -152,7 +152,7 @@ when the service account or network namespace limits visibility.
 - Existing seven-day retention applies to new raw results. Use indexed bounded
   queries and server-side time buckets for detailed historical responses.
 - Online migration adds compatible columns/tables. Validate migration on a copy
-  of a version-4 database and keep a pre-migration backup. Rolling back to an old
+  of a version-5 database and keep a pre-migration backup. Rolling back to an old
   binary after a write migration requires restoring the compatible backup.
 - Use SQLite backup/checkpoint-aware procedures; copying only the database file
   while ignoring a live WAL is not a valid rollback backup.
@@ -220,7 +220,7 @@ when the service account or network namespace limits visibility.
 - Probes/services: controlled ICMP/TCP/HTTP success/failure/timeout targets and
   controlled services; HTTP TLS validation/redirect policy, IPv4/IPv6, disabled
   configuration, update/delete and restart persistence. No shell injection.
-- Database/API: version-4 migration and rollback rehearsal on copies, legacy
+- Database/API: version-5-to-v6 migration and rollback rehearsal on copies, legacy
   report ingestion, unsupported metrics, two timestamps, device history isolation,
   response limits, retention cleanup and authorization.
 - Statistics: deterministic known P95/P99 values, retry duplicates, zero samples,

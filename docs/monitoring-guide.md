@@ -158,10 +158,11 @@ this iteration does not add manual acknowledgement or incident cancellation.
 ## Migration and verification
 
 Upgrade the Hub before Agents. SQLite schema v5 adds monitoring JSON, event
-tables, configuration versions, deduplication indexes and alert subjects.
+tables, configuration versions, deduplication indexes and alert subjects;
+schema v6 adds canonical DNS/process/local-port check samples and indexes.
 Use SQLite's online backup API or stop the Hub for a consistent backup that
-includes committed WAL data. Rolling back to v4 requires its compatible database
-backup as well as the old binary.
+includes committed WAL data. Rolling back to v5 or earlier requires its
+compatible database backup as well as the old binary.
 
 Local regression commands:
 
