@@ -14,6 +14,93 @@ pub struct ProbePolicy {
     pub allow_loopback: bool,
 }
 
+/// Internal DNS observation shape.  It is intentionally kept separate from
+/// the wire result until check-contract-v2.md is finalized.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsRecordType {
+    A,
+    Aaaa,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsRcode {
+    NoError,
+    NoData,
+    ResolverError,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsObservation {
+    pub hostname: String,
+    pub record_type: DnsRecordType,
+    pub rcode: DnsRcode,
+    pub answers: Vec<IpAddr>,
+    pub expected_match: Option<bool>,
+    pub policy_allowed: bool,
+}
+
+/// Resolve an A/AAAA answer set through the system resolver with the same
+/// address policy used by active probes.  The resolver API available in this
+/// release does not expose DNS RCODEs; transport/parse errors are therefore
+/// mapped to `ResolverError`, while an empty valid answer set is `NoData`.
+#[allow(dead_code)]
+pub async fn resolve_dns_observation(
+    hostname: &str,
+    record_type: DnsRecordType,
+    expected_value: Option<IpAddr>,
+    policy: ProbePolicy,
+    timeout_ms: u64,
+) -> DnsObservation {
+    let mut observation = DnsObservation {
+        hostname: hostname.to_owned(),
+        record_type,
+        rcode: DnsRcode::ResolverError,
+        answers: Vec::new(),
+        expected_match: None,
+        policy_allowed: false,
+    };
+    if hostname.is_empty() || hostname.len() > 253 || hostname.contains(['/', '\\', '@']) {
+        return observation;
+    }
+    let lookup = tokio::time::timeout(
+        Duration::from_millis(timeout_ms.clamp(1, 10_000)),
+        tokio::net::lookup_host((hostname, 0)),
+    )
+    .await;
+    let Ok(Ok(addresses)) = lookup else {
+        return observation;
+    };
+    for address in addresses {
+        let ip = address.ip();
+        let type_matches = match record_type {
+            DnsRecordType::A => ip.is_ipv4(),
+            DnsRecordType::Aaaa => ip.is_ipv6(),
+        };
+        if type_matches && !observation.answers.contains(&ip) {
+            observation.answers.push(ip);
+        }
+    }
+    observation.rcode = if observation.answers.is_empty() {
+        DnsRcode::NoData
+    } else {
+        DnsRcode::NoError
+    };
+    observation.policy_allowed = !observation.answers.is_empty()
+        && observation
+            .answers
+            .iter()
+            .all(|ip| allowed_address(*ip, policy));
+    if !observation.policy_allowed && !observation.answers.is_empty() {
+        observation.rcode = DnsRcode::ResolverError;
+    }
+    observation.expected_match = expected_value
+        .map(|expected| observation.policy_allowed && observation.answers.contains(&expected));
+    observation
+}
+
 pub fn allowed_address(ip: IpAddr, policy: ProbePolicy) -> bool {
     match ip {
         IpAddr::V4(ip) => {
@@ -483,6 +570,25 @@ mod tests {
         let mut invalid = target(ProbeKind::Dns, "example.com".into(), Some(53));
         assert!(validate_target(&invalid).is_err());
         invalid.port = None;
+    }
+
+    #[tokio::test]
+    async fn dns_observation_filters_record_family_and_applies_expected_answer_policy() {
+        let observation = resolve_dns_observation(
+            "localhost",
+            DnsRecordType::A,
+            Some("127.0.0.1".parse().unwrap()),
+            ProbePolicy {
+                allow_loopback: true,
+                ..Default::default()
+            },
+            1_000,
+        )
+        .await;
+        assert_eq!(observation.rcode, DnsRcode::NoError);
+        assert!(observation.answers.iter().all(IpAddr::is_ipv4));
+        assert_eq!(observation.expected_match, Some(true));
+        assert!(observation.policy_allowed);
     }
     #[tokio::test]
     async fn http_checks_match_and_do_not_follow_redirects() {
