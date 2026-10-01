@@ -1,5 +1,10 @@
 use chrono::Utc;
+use pinglake_protocol::{
+    CheckStatus, LocalPortAddressFamily, LocalPortAddressScope, LocalPortCheck, LocalPortProtocol,
+    LocalPortResult, ProcessResult,
+};
 use pinglake_protocol::{MetricStatus, NodeMonitoringConfig, ServiceCheck, ServiceResult};
+use uuid::Uuid;
 
 #[path = "local_checks.rs"]
 mod local_checks;
@@ -7,6 +12,161 @@ mod local_checks;
 pub use local_checks::{
     ObservationStatus, ProcessObservation, SocketBinding, SocketObservation, SocketProtocol,
 };
+
+pub fn check_processes(config: &NodeMonitoringConfig) -> Vec<ProcessResult> {
+    config
+        .process_checks
+        .iter()
+        .filter(|check| check.enabled)
+        .take(32)
+        .map(|check| {
+            let observation =
+                local_checks::observe_process_exact(&check.process_name, check.expected_count);
+            let now = Utc::now();
+            let healthy = observation.instance_count.map(|count| {
+                check
+                    .expected_count
+                    .map_or((count > 0) == check.expects_running(), |expected| {
+                        count == expected
+                    })
+            });
+            ProcessResult {
+                id: check.id,
+                name: check.name.clone(),
+                sample_id: Some(Uuid::new_v4()),
+                config_revision: Some(config.revision),
+                scheduled_at: Some(now),
+                completed_at: Some(now),
+                checked_at: Some(now),
+                status: match observation.status {
+                    ObservationStatus::Ok => CheckStatus::Ok,
+                    ObservationStatus::PermissionDenied => CheckStatus::PermissionDenied,
+                    ObservationStatus::Unsupported => CheckStatus::Unsupported,
+                    ObservationStatus::Unknown => CheckStatus::Unavailable,
+                    ObservationStatus::Unavailable => CheckStatus::Unavailable,
+                },
+                healthy,
+                process_name: observation.process_name,
+                count: observation.instance_count,
+                expected_count: check.expected_count,
+                error: observation.error,
+                reason: None,
+            }
+        })
+        .collect()
+}
+
+pub fn check_local_ports(config: &NodeMonitoringConfig) -> Vec<LocalPortResult> {
+    config
+        .local_port_checks
+        .iter()
+        .filter(|check| check.enabled)
+        .take(32)
+        .map(|check| local_port_result(check, config.revision))
+        .collect()
+}
+
+fn local_port_result(check: &LocalPortCheck, revision: u64) -> LocalPortResult {
+    let now = Utc::now();
+    let Some(protocol) = check.protocol else {
+        return unavailable_port_result(check, revision, now, "missing local port protocol");
+    };
+    let observation = local_checks::observe_local_sockets(
+        match protocol {
+            LocalPortProtocol::Tcp => SocketProtocol::Tcp,
+            LocalPortProtocol::Udp => SocketProtocol::Udp,
+        },
+        exact_address(check.address_scope.as_ref()),
+        Some(check.port),
+    );
+    let mut bindings = observation.bindings;
+    bindings.retain(|binding| address_matches(binding.local_address, check));
+    let healthy = (observation.status == ObservationStatus::Ok).then(|| !bindings.is_empty());
+    let status = match observation.status {
+        ObservationStatus::Ok => CheckStatus::Ok,
+        ObservationStatus::PermissionDenied => CheckStatus::PermissionDenied,
+        ObservationStatus::Unsupported => CheckStatus::Unsupported,
+        ObservationStatus::Unknown | ObservationStatus::Unavailable => CheckStatus::Unavailable,
+    };
+    LocalPortResult {
+        id: check.id,
+        name: check.name.clone(),
+        sample_id: Some(Uuid::new_v4()),
+        config_revision: Some(revision),
+        scheduled_at: Some(now),
+        completed_at: Some(now),
+        checked_at: Some(now),
+        status,
+        healthy,
+        address_scope: check.address_scope.clone(),
+        address_family: check.address_family,
+        protocol: Some(protocol),
+        port: check.port,
+        observed_addresses: bindings
+            .iter()
+            .map(|binding| binding.local_address.to_string())
+            .collect(),
+        latency_ms: None,
+        error: observation.error,
+        reason: if healthy == Some(false) {
+            Some("not_listening".into())
+        } else {
+            None
+        },
+    }
+}
+
+fn unavailable_port_result(
+    check: &LocalPortCheck,
+    revision: u64,
+    now: chrono::DateTime<Utc>,
+    error: &str,
+) -> LocalPortResult {
+    LocalPortResult {
+        id: check.id,
+        name: check.name.clone(),
+        sample_id: Some(Uuid::new_v4()),
+        config_revision: Some(revision),
+        scheduled_at: Some(now),
+        completed_at: Some(now),
+        checked_at: Some(now),
+        status: CheckStatus::Unavailable,
+        healthy: None,
+        address_scope: check.address_scope.clone(),
+        address_family: check.address_family,
+        protocol: check.protocol,
+        port: check.port,
+        observed_addresses: Vec::new(),
+        latency_ms: None,
+        error: Some(error.into()),
+        reason: Some("invalid_configuration".into()),
+    }
+}
+
+fn exact_address(scope: Option<&LocalPortAddressScope>) -> Option<std::net::IpAddr> {
+    match scope {
+        Some(LocalPortAddressScope::Exact { address }) => address.parse().ok(),
+        _ => None,
+    }
+}
+
+fn address_matches(address: std::net::IpAddr, check: &LocalPortCheck) -> bool {
+    if let Some(family) = check.address_family {
+        if matches!(family, LocalPortAddressFamily::Ipv4) && !address.is_ipv4() {
+            return false;
+        }
+        if matches!(family, LocalPortAddressFamily::Ipv6) && !address.is_ipv6() {
+            return false;
+        }
+    }
+    match check.address_scope.as_ref() {
+        Some(LocalPortAddressScope::Loopback) => address.is_loopback(),
+        Some(LocalPortAddressScope::Exact { address: expected }) => {
+            expected.parse().ok() == Some(address)
+        }
+        _ => true,
+    }
+}
 
 pub async fn check_services(config: &NodeMonitoringConfig) -> Vec<ServiceResult> {
     let mut results = Vec::new();

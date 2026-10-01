@@ -4,7 +4,10 @@ use std::{
 };
 
 use chrono::Utc;
-use pinglake_protocol::{ProbeKind, ProbeResult, ProbeStatus, ProbeTarget};
+use pinglake_protocol::{
+    DnsObservation as WireDnsObservation, DnsRecordType as WireDnsRecordType, ProbeKind,
+    ProbeResult, ProbeStatus, ProbeTarget,
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -188,8 +191,21 @@ pub fn validate_target(target: &ProbeTarget) -> Result<(), &'static str> {
         || target.target.chars().any(char::is_whitespace)
         || (target.kind == ProbeKind::Tcp && target.port.unwrap_or(0) == 0)
         || (target.kind == ProbeKind::Dns && target.port.is_some())
+        || (target.kind == ProbeKind::Dns
+            && target.dns.as_ref().is_some_and(|dns| {
+                dns.expected_value.as_ref().is_some_and(|value| {
+                    let Ok(parsed) = value.parse::<IpAddr>() else {
+                        return true;
+                    };
+                    (matches!(dns.record_type, WireDnsRecordType::A) && !parsed.is_ipv4())
+                        || (matches!(dns.record_type, WireDnsRecordType::Aaaa) && !parsed.is_ipv6())
+                })
+            }))
     {
         return Err("invalid host or port");
+    }
+    if target.kind == ProbeKind::Dns && target.dns.is_none() {
+        return Err("DNS target requires DNS options");
     }
     Ok(())
 }
@@ -222,6 +238,51 @@ pub async fn run_probe(target: ProbeTarget, revision: u64, policy: ProbePolicy) 
             result.healthy = Some(true);
             result.latency_ms = Some(latency);
             result.http_status = status;
+            if target.kind == ProbeKind::Dns {
+                let options = target
+                    .dns
+                    .clone()
+                    .unwrap_or(pinglake_protocol::DnsProbeOptions {
+                        record_type: WireDnsRecordType::A,
+                        expected_value: None,
+                    });
+                let record_type = match options.record_type {
+                    WireDnsRecordType::A => DnsRecordType::A,
+                    WireDnsRecordType::Aaaa => DnsRecordType::Aaaa,
+                };
+                let expected = options
+                    .expected_value
+                    .as_deref()
+                    .and_then(|value| value.parse::<IpAddr>().ok());
+                let observation = resolve_dns_observation(
+                    &target.target,
+                    record_type,
+                    expected,
+                    policy,
+                    target.timeout_ms,
+                )
+                .await;
+                result.dns = Some(WireDnsObservation {
+                    record_type: options.record_type,
+                    rcode: match observation.rcode {
+                        DnsRcode::NoError => Some(0),
+                        DnsRcode::NoData => Some(0),
+                        DnsRcode::ResolverError => None,
+                    },
+                    answers: observation
+                        .answers
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                });
+                if !observation.policy_allowed {
+                    result.status = ProbeStatus::PolicyDenied;
+                    result.error = Some("DNS answer denied by local probe policy".into());
+                } else if observation.expected_match == Some(false) {
+                    result.status = ProbeStatus::Failure;
+                    result.error = Some("DNS answer did not match expected value".into());
+                }
+            }
         }
         Ok(Err((status, error, http_status))) => {
             result.status = status;
@@ -489,7 +550,10 @@ mod tests {
             timeout_ms: 200,
             expected_status: None,
             response_contains: None,
-            dns: None,
+            dns: (kind == ProbeKind::Dns).then_some(pinglake_protocol::DnsProbeOptions {
+                record_type: WireDnsRecordType::A,
+                expected_value: None,
+            }),
         }
     }
     #[test]
