@@ -10,6 +10,7 @@ use pinglake_protocol::{
     AgentHealth, Capability, MetricReport, MetricStatus, MonitoringData, NodeMonitoringConfig,
     ProbeResult, ProbeTarget, ServiceResult,
 };
+use rand::Rng;
 use tokio::{sync::Notify, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -49,6 +50,11 @@ impl Shared {
             self.health.dropped_reports += 1;
         }
         self.queue.push_back(QueuedReport { report, collected });
+        self.health.queue_length = self.queue.len();
+    }
+
+    fn drop_report(&mut self) {
+        self.health.dropped_reports += 1;
         self.health.queue_length = self.queue.len();
     }
     fn outcome(&mut self, success: bool, duration: Duration, error: Option<String>) {
@@ -203,7 +209,7 @@ async fn send_loop(
         let mut retry = false;
         loop {
             if next.collected.elapsed() > MAX_SAMPLE_AGE {
-                shared.lock().unwrap().health.dropped_reports += 1;
+                shared.lock().unwrap().drop_report();
                 break;
             }
             if let Some(data) = &mut next.report.monitoring {
@@ -214,7 +220,10 @@ async fn send_loop(
             }
             let started = Instant::now();
             let result = tokio::select! {
-                _ = shutdown.cancelled() => return Ok(()),
+                _ = shutdown.cancelled() => {
+                    shared.lock().unwrap().push(next.report.clone(), next.collected);
+                    return Ok(())
+                },
                 result = client.send_metrics(state.agent_id, &state.agent_secret, &next.report) => result,
             };
             shared.lock().unwrap().outcome(
@@ -233,10 +242,27 @@ async fn send_loop(
                 Err(SendError::Transient(_)) => {}
             }
             retry = true;
-            tokio::select! { _ = shutdown.cancelled() => return Ok(()), _ = tokio::time::sleep(backoff) => {} }
+            let delay = retry_delay(backoff);
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    shared.lock().unwrap().push(next.report.clone(), next.collected);
+                    return Ok(())
+                }
+                _ = tokio::time::sleep(delay) => {}
+            }
             backoff = backoff.saturating_mul(2).min(Duration::from_secs(60));
         }
     }
+}
+
+fn retry_delay(base: Duration) -> Duration {
+    // Keep retries spread over a bounded 75%..125% window so a fleet does not
+    // synchronize after a common hub outage. The cap is applied by the caller
+    // before this function, and the jitter never turns a retry into a busy loop.
+    let percent = rand::rng().random_range(75_u32..=125);
+    base.saturating_mul(percent)
+        .checked_div(100)
+        .unwrap_or(base)
 }
 
 fn validate_config(config: &NodeMonitoringConfig) -> Result<()> {
@@ -467,6 +493,16 @@ mod tests {
         assert_eq!(shared.health.success_rate_percent, Some(50.));
         assert_eq!(shared.health.upload_attempts, 150);
         assert_eq!(shared.health.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn retry_delay_stays_within_bounded_jitter_window() {
+        let base = Duration::from_secs(8);
+        for _ in 0..128 {
+            let delay = retry_delay(base);
+            assert!(delay >= Duration::from_secs(6));
+            assert!(delay <= Duration::from_secs(10));
+        }
     }
     #[test]
     fn oversized_details_preserve_a_reportable_base_snapshot() {
