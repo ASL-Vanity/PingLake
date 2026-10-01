@@ -91,7 +91,15 @@ if ($after.group_id -or -not $after.latest) { throw 'Group deletion failed to pr
 
 $endpoint = Invoke-WebRequest -Uri 'http://127.0.0.1:18091/pinglake/latency' -Headers @{ Origin = 'https://monitor.example.com' } -UseBasicParsing
 if ($endpoint.StatusCode -ne 204 -or $endpoint.Headers['Cache-Control'] -notmatch 'no-store') { throw 'Measurement endpoint returned incorrect status or cache policy.' }
-$denied = Invoke-WebRequest -Uri 'http://127.0.0.1:18091/pinglake/latency' -Headers @{ Origin = 'https://other.example.com' } -SkipHttpErrorCheck
-if ($denied.StatusCode -ne 403) { throw 'Measurement endpoint accepted a foreign origin.' }
+try {
+    Invoke-WebRequest -Uri 'http://127.0.0.1:18091/pinglake/latency' -Headers @{ Origin = 'https://other.example.com' } -ErrorAction Stop | Out-Null
+    throw 'Measurement endpoint accepted a foreign origin.'
+} catch {
+    $status = 0
+    if ($_.Exception.Response) {
+        $status = [int]$_.Exception.Response.StatusCode
+    }
+    if ($status -ne 403) { throw }
+}
 
 @{ status = 'passed'; nodes = $nodes.Count; applied_revision = $saved.revision; probes = $results.Count; services = $services.Count; detailed_history_points = $history.Count; group_delete_preserved_node = $true; endpoint_origin_and_cache_checked = $true; browser_https_success_verified = $false } | ConvertTo-Json -Compress
