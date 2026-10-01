@@ -171,7 +171,7 @@ async fn collect_loop(
         let data = report
             .monitoring
             .get_or_insert_with(MonitoringData::default);
-        data.schema_version = 1;
+        data.schema_version = 2;
         data.session_id = session_id;
         data.sample_sequence = sequence;
         data.report_interval_secs = interval;
@@ -254,7 +254,11 @@ async fn collect_loop(
                     address: check.address.clone(),
                     port: check.port,
                     latency_ms: None,
-                    error: if listening { None } else { Some("port is not listening".into()) },
+                    error: if listening {
+                        None
+                    } else {
+                        Some("port is not listening".into())
+                    },
                 }
             })
             .collect();
@@ -347,7 +351,12 @@ fn retry_delay(base: Duration) -> Duration {
 }
 
 fn validate_config(config: &NodeMonitoringConfig) -> Result<()> {
-    if config.services.len() > 32 || config.process_checks.len() > 32 || config.probes.len() > 32 {
+    if config.services.len() > 32
+        || config.process_checks.len() > 32
+        || config.probes.len() > 32
+        || config.dns_checks.len() > 32
+        || config.local_port_checks.len() > 32
+    {
         bail!("monitor configuration exceeds target limits");
     }
     let mut ids = HashSet::new();
@@ -380,6 +389,36 @@ fn validate_config(config: &NodeMonitoringConfig) -> Result<()> {
                 .any(|c| c == '/' || c == '\\' || c.is_control())
         {
             bail!("invalid process configuration");
+        }
+    }
+    for check in &config.dns_checks {
+        if check.id.is_nil()
+            || !ids.insert(check.id)
+            || check.name.trim().is_empty()
+            || check.name.len() > 128
+            || check.hostname.trim().is_empty()
+            || check.hostname.len() > 253
+            || !matches!(check.record_type.as_str(), "A" | "AAAA")
+            || !(10..=86_400).contains(&check.interval_secs)
+            || check.timeout_ms == 0
+            || check.timeout_ms > 10_000
+            || check.timeout_ms >= check.interval_secs * 1000
+        {
+            bail!("invalid DNS check configuration");
+        }
+    }
+    for check in &config.local_port_checks {
+        if check.id.is_nil()
+            || !ids.insert(check.id)
+            || check.name.trim().is_empty()
+            || check.name.len() > 128
+            || check.port == 0
+            || !(10..=86_400).contains(&check.interval_secs)
+            || check.timeout_ms == 0
+            || check.timeout_ms > 10_000
+            || check.timeout_ms >= check.interval_secs * 1000
+        {
+            bail!("invalid local port check configuration");
         }
     }
     ids.clear();

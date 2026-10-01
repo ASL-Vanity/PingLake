@@ -245,7 +245,7 @@ pub struct DnsResult {
 /// A process existence/health check, identified by a stable process name or
 /// executable pattern. The protocol does not prescribe how an Agent locates
 /// processes on a platform.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProcessCheck {
     pub id: Uuid,
@@ -253,8 +253,15 @@ pub struct ProcessCheck {
     pub process_name: String,
     pub expected_count: Option<u32>,
     pub enabled: bool,
+    pub expected_state: String,
     pub interval_secs: u64,
     pub timeout_ms: u64,
+}
+
+impl ProcessCheck {
+    pub fn expects_running(&self) -> bool {
+        self.expected_state == "running"
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -378,23 +385,6 @@ pub struct NodeMonitoringConfig {
     pub process_checks: Vec<ProcessCheck>,
     #[serde(default)]
     pub local_port_checks: Vec<LocalPortCheck>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ProcessCheck {
-    pub id: Uuid,
-    pub name: String,
-    pub process_name: String,
-    pub expected_count: Option<u32>,
-    #[serde(default = "enabled")]
-    pub enabled: bool,
-    #[serde(default = "running")]
-    pub expected_state: String,
-    #[serde(default = "interval")]
-    pub interval_secs: u64,
-    #[serde(default = "timeout")]
-    pub timeout_ms: u64,
 }
 
 impl Default for ProcessCheck {

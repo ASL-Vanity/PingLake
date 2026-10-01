@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, HashSet};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use pinglake_protocol::{
-    MetricReport, MetricStatus, MonitoringData, MonitoringHistoryPoint, NodeMonitoringConfig,
-    ProbeKind, ProbeResult, ProbeStatistics, ProbeStatus,
+    CheckStatus, MetricReport, MetricStatus, MonitoringData, MonitoringHistoryPoint,
+    NodeMonitoringConfig, ProbeKind, ProbeResult, ProbeStatistics, ProbeStatus,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use uuid::Uuid;
@@ -613,8 +613,13 @@ fn bounded_error(value: &str) -> Result<(), AppError> {
 }
 
 pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppError> {
-    if config.services.len() > 32 || config.process_checks.len() > 32 || config.probes.len() > 32 {
-        return Err(invalid("at most 32 services and 32 probes are allowed"));
+    if config.services.len() > 32
+        || config.process_checks.len() > 32
+        || config.probes.len() > 32
+        || config.dns_checks.len() > 32
+        || config.local_port_checks.len() > 32
+    {
+        return Err(invalid("at most 32 checks of each kind are allowed"));
     }
     if let Some(value) = &config.browser_latency_url {
         bounded(value, 2048, false)?;
@@ -664,6 +669,39 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
             return Err(invalid("invalid process configuration"));
         }
     }
+    for check in &config.dns_checks {
+        if check.id.is_nil() || !ids.insert(check.id) {
+            return Err(invalid("DNS check IDs must be non-nil and unique"));
+        }
+        bounded(&check.name, 128, false)?;
+        bounded(&check.hostname, 253, false)?;
+        bounded(&check.record_type, 16, false)?;
+        if !matches!(check.record_type.as_str(), "A" | "AAAA")
+            || !(10..=86_400).contains(&check.interval_secs)
+            || check.timeout_ms == 0
+            || check.timeout_ms > 10_000
+            || check.timeout_ms >= check.interval_secs * 1000
+        {
+            return Err(invalid("invalid DNS check configuration"));
+        }
+    }
+    for check in &config.local_port_checks {
+        if check.id.is_nil() || !ids.insert(check.id) {
+            return Err(invalid("local port check IDs must be non-nil and unique"));
+        }
+        bounded(&check.name, 128, false)?;
+        if check.port == 0
+            || !(10..=86_400).contains(&check.interval_secs)
+            || check.timeout_ms == 0
+            || check.timeout_ms > 10_000
+            || check.timeout_ms >= check.interval_secs * 1000
+        {
+            return Err(invalid("invalid local port check configuration"));
+        }
+        if let Some(address) = &check.address {
+            bounded(address, 128, false)?;
+        }
+    }
     ids.clear();
     for probe in &config.probes {
         if probe.id.is_nil() || !ids.insert(probe.id) {
@@ -707,7 +745,7 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
                     ));
                 }
             }
-            ProbeKind::Tcp | ProbeKind::Icmp | ProbeKind::Dns => {
+            ProbeKind::Tcp | ProbeKind::Icmp => {
                 if probe.target.len() > 253
                     || probe.target.starts_with('-')
                     || probe
@@ -724,13 +762,16 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
                     return Err(invalid("DNS probe does not accept a port"));
                 }
             }
-            // The protocol reserves these kinds for Agents that implement the
-            // corresponding extension. Older Hubs persist and relay them;
-            // execution support is intentionally outside this module.
-            ProbeKind::Dns | ProbeKind::Process | ProbeKind::LocalPort => {
-                bounded(&probe.target, 253, true)?;
-                if probe.kind == ProbeKind::LocalPort && probe.port.is_none() {
-                    return Err(invalid("local port probe requires a port"));
+            ProbeKind::Dns => {
+                if probe.target.len() > 253
+                    || probe.target.starts_with('-')
+                    || probe
+                        .target
+                        .chars()
+                        .any(|value| !value.is_ascii_alphanumeric() && !".-".contains(value))
+                    || probe.port.is_some()
+                {
+                    return Err(invalid("DNS target must be a hostname without a port"));
                 }
             }
         }
@@ -768,7 +809,7 @@ fn counter(value: Option<&str>) -> Result<(), AppError> {
 }
 
 pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
-    if data.schema_version > 1
+    if data.schema_version > 2
         || data.report_interval_secs > 86_400
         || data.cpu_cores.len() > 1024
         || data.disk_io.len() > 128
@@ -776,6 +817,9 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         || data.network_health.len() > 128
         || data.services.len() > 32
         || data.probes.len() > 128
+        || data.dns_checks.len() > 128
+        || data.process_checks.len() > 32
+        || data.local_port_checks.len() > 32
         || data.capabilities.len() > 32
         || data.tcp.states.len() > 32
     {
@@ -961,6 +1005,67 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
             return Err(invalid("invalid HTTP result status"));
         }
         if let Some(error) = &probe.error {
+            bounded_error(error)?;
+        }
+    }
+    for check in &data.dns_checks {
+        if check.id.is_nil() {
+            return Err(invalid("invalid DNS check identity"));
+        }
+        bounded(&check.name, 128, false)?;
+        bounded(&check.hostname, 253, false)?;
+        bounded(&check.record_type, 16, false)?;
+        nonnegative(check.latency_ms)?;
+        if let Some(checked_at) = check.checked_at
+            && (checked_at < earliest || checked_at > latest)
+        {
+            return Err(invalid("DNS check time outside accepted window"));
+        }
+        if check.status == CheckStatus::Ok && check.latency_ms.is_none() {
+            return Err(invalid("successful DNS check needs a latency"));
+        }
+        if let Some(error) = &check.error {
+            bounded_error(error)?;
+        }
+        for answer in &check.answers {
+            bounded(answer, 256, false)?;
+        }
+    }
+    for check in &data.process_checks {
+        if check.id.is_nil() {
+            return Err(invalid("invalid process check identity"));
+        }
+        bounded(&check.name, 256, false)?;
+        bounded(&check.process_name, 256, false)?;
+        if let Some(checked_at) = check.checked_at
+            && (checked_at < earliest || checked_at > latest)
+        {
+            return Err(invalid("process check time outside accepted window"));
+        }
+        if let Some(error) = &check.error {
+            bounded_error(error)?;
+        }
+        if check.count.is_some_and(|value| value > 1_000_000)
+            || check.expected_count.is_some_and(|value| value > 1_000_000)
+        {
+            return Err(invalid("process check count exceeds supported range"));
+        }
+    }
+    for check in &data.local_port_checks {
+        if check.id.is_nil() || check.port == 0 {
+            return Err(invalid("invalid local port check identity or port"));
+        }
+        bounded(&check.name, 128, false)?;
+        if let Some(address) = &check.address {
+            bounded(address, 128, false)?;
+        }
+        nonnegative(check.latency_ms)?;
+        if let Some(checked_at) = check.checked_at
+            && (checked_at < earliest || checked_at > latest)
+        {
+            return Err(invalid("local port check time outside accepted window"));
+        }
+        if let Some(error) = &check.error {
             bounded_error(error)?;
         }
     }

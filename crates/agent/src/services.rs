@@ -432,6 +432,7 @@ mod tests {
             process_name: "pinglake-process-that-does-not-exist".into(),
             enabled: true,
             expected_state: "running".into(),
+            ..Default::default()
         };
         let result = query_process(check, 9).await;
         assert_eq!(result.status, MetricStatus::Ok);
