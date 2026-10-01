@@ -135,6 +135,12 @@ pub struct TcpMetrics {
     pub listening_sockets: u64,
     pub listening_ports: u64,
     pub scope: String,
+    #[serde(default)]
+    pub listening_port_numbers: Vec<u16>,
+    #[serde(default)]
+    pub udp_listening_sockets: u64,
+    #[serde(default)]
+    pub udp_listening_ports: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -316,8 +322,6 @@ pub enum ProbeKind {
     Tcp,
     Http,
     Dns,
-    Process,
-    LocalPort,
 }
 
 impl Default for ProbeKind {
@@ -370,10 +374,42 @@ pub struct NodeMonitoringConfig {
     pub probes: Vec<ProbeTarget>,
     #[serde(default)]
     pub dns_checks: Vec<DnsCheck>,
-    #[serde(default)]
+    #[serde(default, alias = "processes")]
     pub process_checks: Vec<ProcessCheck>,
     #[serde(default)]
     pub local_port_checks: Vec<LocalPortCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcessCheck {
+    pub id: Uuid,
+    pub name: String,
+    pub process_name: String,
+    pub expected_count: Option<u32>,
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+    #[serde(default = "running")]
+    pub expected_state: String,
+    #[serde(default = "interval")]
+    pub interval_secs: u64,
+    #[serde(default = "timeout")]
+    pub timeout_ms: u64,
+}
+
+impl Default for ProcessCheck {
+    fn default() -> Self {
+        Self {
+            id: Uuid::nil(),
+            name: String::new(),
+            process_name: String::new(),
+            expected_count: None,
+            enabled: enabled(),
+            expected_state: running(),
+            interval_secs: interval(),
+            timeout_ms: timeout(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

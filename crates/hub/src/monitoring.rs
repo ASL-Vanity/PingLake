@@ -613,7 +613,7 @@ fn bounded_error(value: &str) -> Result<(), AppError> {
 }
 
 pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppError> {
-    if config.services.len() > 32 || config.probes.len() > 32 {
+    if config.services.len() > 32 || config.process_checks.len() > 32 || config.probes.len() > 32 {
         return Err(invalid("at most 32 services and 32 probes are allowed"));
     }
     if let Some(value) = &config.browser_latency_url {
@@ -647,6 +647,21 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
         }
         if !["running", "stopped"].contains(&service.expected_state.as_str()) {
             return Err(invalid("service expected_state must be running or stopped"));
+        }
+    }
+    for process in &config.process_checks {
+        if process.id.is_nil() || !ids.insert(process.id) {
+            return Err(invalid("process IDs must be non-nil and unique"));
+        }
+        bounded(&process.name, 256, false)?;
+        bounded(&process.process_name, 256, false)?;
+        if process
+            .process_name
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c.is_control())
+            || !["running", "stopped"].contains(&process.expected_state.as_str())
+        {
+            return Err(invalid("invalid process configuration"));
         }
     }
     ids.clear();
@@ -692,7 +707,7 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
                     ));
                 }
             }
-            ProbeKind::Tcp | ProbeKind::Icmp => {
+            ProbeKind::Tcp | ProbeKind::Icmp | ProbeKind::Dns => {
                 if probe.target.len() > 253
                     || probe.target.starts_with('-')
                     || probe
@@ -704,6 +719,9 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
                 }
                 if probe.kind == ProbeKind::Tcp && probe.port.is_none() {
                     return Err(invalid("TCP probe requires a port"));
+                }
+                if probe.kind == ProbeKind::Dns && probe.port.is_some() {
+                    return Err(invalid("DNS probe does not accept a port"));
                 }
             }
             // The protocol reserves these kinds for Agents that implement the

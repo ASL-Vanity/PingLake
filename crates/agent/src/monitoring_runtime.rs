@@ -7,8 +7,9 @@ use std::{
 use anyhow::{Result, bail};
 use chrono::Utc;
 use pinglake_protocol::{
-    AgentHealth, Capability, MetricReport, MetricStatus, MonitoringData, NodeMonitoringConfig,
-    ProbeResult, ProbeTarget, ServiceResult,
+    AgentHealth, Capability, CheckStatus, DnsResult, LocalPortResult, MetricReport, MetricStatus,
+    MonitoringData, NodeMonitoringConfig, ProbeKind, ProbeResult, ProbeTarget, ProcessResult,
+    ServiceResult,
 };
 use rand::Rng;
 use tokio::{sync::Notify, task::JoinSet};
@@ -177,6 +178,86 @@ async fn collect_loop(
         data.agent = shared.health.clone();
         data.services = shared.services.clone();
         data.probes = shared.probes.iter().cloned().collect();
+        data.dns_checks = data
+            .probes
+            .iter()
+            .filter(|probe| probe.kind == ProbeKind::Dns)
+            .map(|probe| DnsResult {
+                id: probe.target_id,
+                name: probe.target_id.to_string(),
+                checked_at: Some(probe.completed_at),
+                status: CheckStatus::from(probe.status.clone()),
+                hostname: shared
+                    .config
+                    .probes
+                    .iter()
+                    .find(|target| target.id == probe.target_id)
+                    .map(|target| target.target.clone())
+                    .unwrap_or_default(),
+                record_type: "A/AAAA".into(),
+                answers: Vec::new(),
+                latency_ms: probe.latency_ms,
+                error: probe.error.clone(),
+            })
+            .collect();
+        let process_ids = shared
+            .config
+            .process_checks
+            .iter()
+            .map(|check| check.id)
+            .collect::<HashSet<_>>();
+        data.process_checks = shared
+            .services
+            .iter()
+            .filter(|service| process_ids.contains(&service.id))
+            .map(|service| ProcessResult {
+                id: service.id,
+                name: service.name.clone(),
+                checked_at: Some(service.checked_at),
+                status: match service.status {
+                    MetricStatus::Ok => CheckStatus::Ok,
+                    MetricStatus::PermissionDenied => CheckStatus::PermissionDenied,
+                    MetricStatus::Unsupported => CheckStatus::Unsupported,
+                    MetricStatus::Stale => CheckStatus::Stale,
+                    MetricStatus::WarmingUp => CheckStatus::WarmingUp,
+                    MetricStatus::Unavailable => CheckStatus::Unavailable,
+                },
+                process_name: shared
+                    .config
+                    .process_checks
+                    .iter()
+                    .find(|check| check.id == service.id)
+                    .map(|check| check.process_name.clone())
+                    .unwrap_or_default(),
+                count: Some((service.state == "running") as u32),
+                expected_count: shared
+                    .config
+                    .process_checks
+                    .iter()
+                    .find(|check| check.id == service.id)
+                    .and_then(|check| check.expected_count),
+                error: service.error.clone(),
+            })
+            .collect();
+        data.local_port_checks = shared
+            .config
+            .local_port_checks
+            .iter()
+            .filter(|check| check.enabled)
+            .map(|check| {
+                let listening = data.tcp.listening_port_numbers.contains(&check.port);
+                LocalPortResult {
+                    id: check.id,
+                    name: check.name.clone(),
+                    checked_at: Some(report.collected_at),
+                    status: CheckStatus::Ok,
+                    address: check.address.clone(),
+                    port: check.port,
+                    latency_ms: None,
+                    error: if listening { None } else { Some("port is not listening".into()) },
+                }
+            })
+            .collect();
         data.capabilities
             .insert("browser_endpoint".into(), shared.endpoint.clone());
         fit_report_budget(&mut report)?;
@@ -266,7 +347,7 @@ fn retry_delay(base: Duration) -> Duration {
 }
 
 fn validate_config(config: &NodeMonitoringConfig) -> Result<()> {
-    if config.services.len() > 32 || config.probes.len() > 32 {
+    if config.services.len() > 32 || config.process_checks.len() > 32 || config.probes.len() > 32 {
         bail!("monitor configuration exceeds target limits");
     }
     let mut ids = HashSet::new();
@@ -283,6 +364,22 @@ fn validate_config(config: &NodeMonitoringConfig) -> Result<()> {
             || !matches!(service.expected_state.as_str(), "running" | "stopped")
         {
             bail!("invalid service configuration");
+        }
+    }
+    for process in &config.process_checks {
+        if process.id.is_nil()
+            || !ids.insert(process.id)
+            || process.name.trim().is_empty()
+            || process.name.len() > 256
+            || process.process_name.trim().is_empty()
+            || process.process_name.len() > 256
+            || !matches!(process.expected_state.as_str(), "running" | "stopped")
+            || process
+                .process_name
+                .chars()
+                .any(|c| c == '/' || c == '\\' || c.is_control())
+        {
+            bail!("invalid process configuration");
         }
     }
     ids.clear();

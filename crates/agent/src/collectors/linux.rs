@@ -230,7 +230,11 @@ impl PlatformCollector {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
                 Err(error) => return Err(error),
             };
-            parse_tcp(&v4, &v6)
+            let mut tcp = parse_tcp(&v4, &v6)?;
+            let udp4 = fs::read_to_string("/proc/net/udp").unwrap_or_default();
+            let udp6 = fs::read_to_string("/proc/net/udp6").unwrap_or_default();
+            parse_udp(&udp4, &udp6, &mut tcp)?;
+            Ok(tcp)
         });
         match result {
             Ok(tcp) => {
@@ -544,7 +548,27 @@ fn parse_tcp(v4: &str, v6: &str) -> io::Result<TcpMetrics> {
         }
     }
     value.listening_ports = ports.len() as u64;
+    value.listening_port_numbers = ports.into_iter().collect();
     Ok(value)
+}
+
+fn parse_udp(v4: &str, v6: &str, value: &mut TcpMetrics) -> io::Result<()> {
+    let mut ports = BTreeSet::new();
+    for text in [v4, v6] {
+        for line in text.lines().skip(1).filter(|line| !line.trim().is_empty()) {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 2 {
+                return Err(invalid("incomplete UDP table"));
+            }
+            let (_, port) = fields[1]
+                .rsplit_once(':')
+                .ok_or_else(|| invalid("invalid UDP endpoint"))?;
+            ports.insert(u16::from_str_radix(port, 16).map_err(|_| invalid("invalid UDP port"))?);
+            value.udp_listening_sockets += 1;
+        }
+    }
+    value.udp_listening_ports = ports.len() as u64;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -604,6 +628,20 @@ mod tests {
         assert_eq!(tcp.listening_sockets, 2);
         assert_eq!(tcp.listening_ports, 1);
         assert_eq!(tcp.states["time_wait"], 1);
+    }
+
+    #[test]
+    fn udp_observation_is_a_heuristic_and_deduplicates_families() {
+        let mut value = TcpMetrics::default();
+        parse_udp(
+            "header\n0: 00000000:0035 00000000:0000 07",
+            "header\n0: 00000000000000000000000000000000:0035 00000000000000000000000000000000:0000 07",
+            &mut value,
+        )
+        .unwrap();
+        assert_eq!(value.udp_listening_sockets, 2);
+        assert_eq!(value.udp_listening_ports, 1);
+        assert!(parse_udp("header\n0: broken", "", &mut TcpMetrics::default()).is_err());
     }
     #[test]
     fn malformed_proc_counters_never_become_zero_measurements() {

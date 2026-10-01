@@ -1,5 +1,7 @@
 use chrono::Utc;
-use pinglake_protocol::{MetricStatus, NodeMonitoringConfig, ServiceCheck, ServiceResult};
+use pinglake_protocol::{
+    MetricStatus, NodeMonitoringConfig, ProcessCheck, ServiceCheck, ServiceResult,
+};
 
 pub async fn check_services(config: &NodeMonitoringConfig) -> Vec<ServiceResult> {
     let mut results = Vec::new();
@@ -9,7 +11,7 @@ pub async fn check_services(config: &NodeMonitoringConfig) -> Vec<ServiceResult>
         .filter(|check| check.enabled)
         .take(32)
         .collect::<Vec<_>>();
-    // Limit native queries and systemctl processes while checking each configured service.
+    // Keep native queries bounded so a hostile configuration cannot exhaust the agent.
     for batch in checks.chunks(4) {
         let mut jobs = tokio::task::JoinSet::new();
         for check in batch {
@@ -24,8 +26,98 @@ pub async fn check_services(config: &NodeMonitoringConfig) -> Vec<ServiceResult>
             }
         }
     }
+    for check in config
+        .process_checks
+        .iter()
+        .filter(|check| check.enabled)
+        .take(32)
+    {
+        results.push(query_process(check.clone(), config.revision).await);
+    }
     results.sort_by_key(|value| value.id);
     results
+}
+
+async fn query_process(check: ProcessCheck, revision: u64) -> ServiceResult {
+    let mut result = ServiceResult {
+        id: check.id,
+        name: check.name.clone(),
+        checked_at: Utc::now(),
+        status: MetricStatus::Unavailable,
+        state: "unknown".into(),
+        healthy: None,
+        error: None,
+        config_revision: revision,
+    };
+    if check.process_name.is_empty()
+        || check.process_name.len() > 256
+        || check
+            .process_name
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c.is_control())
+        || !matches!(check.expected_state.as_str(), "running" | "stopped")
+    {
+        result.error = Some("invalid process configuration".into());
+        return result;
+    }
+    match process_running(&check.process_name) {
+        Ok(running) => {
+            result.status = MetricStatus::Ok;
+            result.state = if running { "running" } else { "stopped" }.into();
+            result.healthy = Some(result.state == check.expected_state);
+        }
+        Err((status, error)) => {
+            result.status = status;
+            result.error = Some(error);
+        }
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn process_running(name: &str) -> Result<bool, (MetricStatus, String)> {
+    let entries = std::fs::read_dir("/proc").map_err(|e| {
+        (
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                MetricStatus::PermissionDenied
+            } else {
+                MetricStatus::Unavailable
+            },
+            "failed to read process table".into(),
+        )
+    })?;
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        if !file.to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let comm = entry.path().join("comm");
+        if let Ok(value) = std::fs::read_to_string(comm) {
+            if value.trim_end() == name || value.trim_end().rsplit('/').next() == Some(name) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "windows")]
+fn process_running(name: &str) -> Result<bool, (MetricStatus, String)> {
+    use sysinfo::{ProcessesToUpdate, System};
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    Ok(system
+        .processes()
+        .values()
+        .any(|p| p.name().to_string_lossy().eq_ignore_ascii_case(name)))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn process_running(_: &str) -> Result<bool, (MetricStatus, String)> {
+    Err((
+        MetricStatus::Unsupported,
+        "process queries are unsupported on this platform".into(),
+    ))
 }
 
 async fn query(check: ServiceCheck, revision: u64) -> ServiceResult {
@@ -330,6 +422,22 @@ mod tests {
             "not_found"
         );
         assert!(parse_systemd("ActiveState=active").is_err());
+    }
+
+    #[tokio::test]
+    async fn configured_process_checks_are_bounded_and_do_not_expose_pids() {
+        let check = ProcessCheck {
+            id: uuid::Uuid::new_v4(),
+            name: "missing process".into(),
+            process_name: "pinglake-process-that-does-not-exist".into(),
+            enabled: true,
+            expected_state: "running".into(),
+        };
+        let result = query_process(check, 9).await;
+        assert_eq!(result.status, MetricStatus::Ok);
+        assert_eq!(result.state, "stopped");
+        assert_eq!(result.healthy, Some(false));
+        assert_eq!(result.config_revision, 9);
     }
     #[cfg(target_os = "windows")]
     #[tokio::test]

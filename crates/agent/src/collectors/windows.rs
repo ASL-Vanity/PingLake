@@ -374,6 +374,7 @@ fn tcp_metrics() -> Result<TcpMetrics, u32> {
         record_tcp(&mut result, &mut ports, row.State as u32, row.dwLocalPort);
     }
     result.listening_ports = ports.len() as u64;
+    result.listening_port_numbers = ports.into_iter().collect();
     Ok(result)
 }
 

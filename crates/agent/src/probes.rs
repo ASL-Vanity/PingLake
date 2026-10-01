@@ -100,6 +100,7 @@ pub fn validate_target(target: &ProbeTarget) -> Result<(), &'static str> {
         || target.target.contains(['/', '@', '?', '#', '\\'])
         || target.target.chars().any(char::is_whitespace)
         || (target.kind == ProbeKind::Tcp && target.port.unwrap_or(0) == 0)
+        || (target.kind == ProbeKind::Dns && target.port.is_some())
     {
         return Err("invalid host or port");
     }
@@ -169,6 +170,7 @@ async fn execute(
         .as_ref()
         .and_then(Url::port_or_known_default)
         .unwrap_or(target.port.unwrap_or(0));
+    let started = Instant::now();
     let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
         .await
         .map_err(|_| failure("DNS resolution failed"))?
@@ -187,6 +189,9 @@ async fn execute(
             "target address denied by local probe policy".into(),
             None,
         ));
+    }
+    if target.kind == ProbeKind::Dns {
+        return Ok((started.elapsed().as_secs_f64() * 1000., None));
     }
     match target.kind {
         ProbeKind::Tcp => {
@@ -254,11 +259,7 @@ async fn execute(
         ProbeKind::Icmp => icmp(addresses[0].ip(), target.timeout_ms)
             .await
             .map(|ms| (ms, None)),
-        ProbeKind::Dns | ProbeKind::Process | ProbeKind::LocalPort => Err((
-            ProbeStatus::Unsupported,
-            "probe kind is not implemented by this Agent".into(),
-            None,
-        )),
+        ProbeKind::Dns => Ok((started.elapsed().as_secs_f64() * 1000., None)),
     }
 }
 
@@ -456,6 +457,27 @@ mod tests {
             .status,
             ProbeStatus::Success
         );
+    }
+
+    #[tokio::test]
+    async fn dns_probe_resolves_without_connecting_or_accepting_a_port() {
+        let mut probe = target(ProbeKind::Dns, "localhost".into(), None);
+        probe.timeout_ms = 1_000;
+        let denied = run_probe(probe.clone(), 1, ProbePolicy::default()).await;
+        assert_eq!(denied.status, ProbeStatus::PolicyDenied);
+        let allowed = run_probe(
+            probe,
+            1,
+            ProbePolicy {
+                allow_loopback: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(allowed.status, ProbeStatus::Success);
+        let mut invalid = target(ProbeKind::Dns, "example.com".into(), Some(53));
+        assert!(validate_target(&invalid).is_err());
+        invalid.port = None;
     }
     #[tokio::test]
     async fn http_checks_match_and_do_not_follow_redirects() {
