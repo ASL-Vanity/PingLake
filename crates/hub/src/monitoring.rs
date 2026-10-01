@@ -149,16 +149,15 @@ impl Database {
             .iter()
             .map(|result| result.config_revision)
             .chain(data.probes.iter().map(|result| result.config_revision))
-            .chain(data.dns_checks.iter().map(|result| result.config_revision))
             .chain(
                 data.process_checks
                     .iter()
-                    .map(|result| result.config_revision),
+                    .filter_map(|result| result.config_revision),
             )
             .chain(
                 data.local_port_checks
                     .iter()
-                    .map(|result| result.config_revision),
+                    .filter_map(|result| result.config_revision),
             )
         {
             if configs.contains_key(&revision) {
@@ -218,67 +217,49 @@ impl Database {
                 return Ok(false);
             }
         }
-        for result in &data.dns_checks {
-            if !configs[&result.config_revision]
-                .dns_checks
-                .iter()
-                .any(|check| check.id == result.id && check.enabled && check.name == result.name)
-            {
-                return Ok(false);
-            }
-            if result.sample_id.is_nil() {
-                continue;
-            }
-            if sample_payload_conflicts(
-                &connection,
-                node_id,
-                "dns",
-                result.sample_id,
-                result.config_revision,
-                &serde_json::to_string(result)?,
-            )? {
-                return Ok(false);
-            }
-        }
         for result in &data.process_checks {
-            if !configs[&result.config_revision]
+            let (Some(sample_id), Some(config_revision)) =
+                (result.sample_id, result.config_revision)
+            else {
+                continue;
+            };
+            if !configs[&config_revision]
                 .process_checks
                 .iter()
                 .any(|check| check.id == result.id && check.enabled && check.name == result.name)
             {
                 return Ok(false);
             }
-            if result.sample_id.is_nil() {
-                continue;
-            }
             if sample_payload_conflicts(
                 &connection,
                 node_id,
                 "process",
-                result.sample_id,
-                result.config_revision,
+                sample_id,
+                config_revision,
                 &serde_json::to_string(result)?,
             )? {
                 return Ok(false);
             }
         }
         for result in &data.local_port_checks {
-            if !configs[&result.config_revision]
+            let (Some(sample_id), Some(config_revision)) =
+                (result.sample_id, result.config_revision)
+            else {
+                continue;
+            };
+            if !configs[&config_revision]
                 .local_port_checks
                 .iter()
                 .any(|check| check.id == result.id && check.enabled && check.name == result.name)
             {
                 return Ok(false);
             }
-            if result.sample_id.is_nil() {
-                continue;
-            }
             if sample_payload_conflicts(
                 &connection,
                 node_id,
                 "port",
-                result.sample_id,
-                result.config_revision,
+                sample_id,
+                config_revision,
                 &serde_json::to_string(result)?,
             )? {
                 return Ok(false);
@@ -325,7 +306,11 @@ impl Database {
         for row in rows {
             let (collected_at, received_at, json) = row?;
             let mut monitoring: MonitoringData = serde_json::from_str(&json)?;
-            select_section(&mut monitoring, section, device);
+            select_section(
+                &mut monitoring,
+                if section == "dns" { "probes" } else { section },
+                device,
+            );
             points.push(MonitoringHistoryPoint {
                 collected_at: parse_time(collected_at)?,
                 received_at: parse_time(received_at)?,
@@ -341,12 +326,7 @@ impl Database {
             let (table, time_column, id_column, kind) = match section {
                 "probes" => ("check_samples", "scheduled_at", "subject_id", "probe"),
                 "services" => ("service_samples", "checked_at", "subject_id", "service"),
-                "dns" => (
-                    "check_samples",
-                    "COALESCE(scheduled_at, checked_at)",
-                    "subject_id",
-                    "dns",
-                ),
+                "dns" => ("check_samples", "scheduled_at", "subject_id", "probe"),
                 "processes" => (
                     "check_samples",
                     "COALESCE(scheduled_at, checked_at)",
@@ -393,7 +373,10 @@ impl Database {
                 } else if section == "services" {
                     monitoring.services.push(serde_json::from_str(&json)?);
                 } else if section == "dns" {
-                    monitoring.dns_checks.push(serde_json::from_str(&json)?);
+                    let probe: ProbeResult = serde_json::from_str(&json)?;
+                    if probe.kind == ProbeKind::Dns {
+                        monitoring.probes.push(probe);
+                    }
                 } else if section == "processes" {
                     monitoring.process_checks.push(serde_json::from_str(&json)?);
                 } else {
@@ -624,34 +607,16 @@ pub(crate) fn insert_results(
         transaction.execute("INSERT OR IGNORE INTO service_samples(node_id, subject_id, config_revision, checked_at, received_at, result_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
             params![node_id.to_string(), service.id.to_string(), i64::try_from(service.config_revision)?, timestamp(service.checked_at), timestamp(received_at), serde_json::to_string(service)?])?;
     }
-    for check in &data.dns_checks {
-        if !check.sample_id.is_nil() {
-            let payload = serde_json::to_string(check)?;
-            insert_check_sample(
-                transaction,
-                node_id,
-                "dns",
-                check.id,
-                check.sample_id,
-                check.config_revision,
-                check.scheduled_at,
-                check.completed_at,
-                check.checked_at,
-                received_at,
-                &payload,
-            )?;
-        }
-    }
     for check in &data.process_checks {
-        if !check.sample_id.is_nil() {
+        if let (Some(sample_id), Some(config_revision)) = (check.sample_id, check.config_revision) {
             let payload = serde_json::to_string(check)?;
             insert_check_sample(
                 transaction,
                 node_id,
                 "process",
                 check.id,
-                check.sample_id,
-                check.config_revision,
+                sample_id,
+                config_revision,
                 check.scheduled_at,
                 check.completed_at,
                 check.checked_at,
@@ -661,15 +626,15 @@ pub(crate) fn insert_results(
         }
     }
     for check in &data.local_port_checks {
-        if !check.sample_id.is_nil() {
+        if let (Some(sample_id), Some(config_revision)) = (check.sample_id, check.config_revision) {
             let payload = serde_json::to_string(check)?;
             insert_check_sample(
                 transaction,
                 node_id,
                 "port",
                 check.id,
-                check.sample_id,
-                check.config_revision,
+                sample_id,
+                config_revision,
                 check.scheduled_at,
                 check.completed_at,
                 check.checked_at,
@@ -693,8 +658,6 @@ fn select_section(data: &mut MonitoringData, section: &str, device: Option<&str>
             .retain(|service| service.id.to_string() == device);
         data.probes
             .retain(|probe| probe.target_id.to_string() == device);
-        data.dns_checks
-            .retain(|check| check.id.to_string() == device);
         data.process_checks
             .retain(|check| check.id.to_string() == device);
         data.local_port_checks
@@ -728,9 +691,6 @@ fn select_section(data: &mut MonitoringData, section: &str, device: Option<&str>
     }
     if section != "probes" {
         data.probes.clear();
-    }
-    if section != "dns" {
-        data.dns_checks.clear();
     }
     if section != "processes" {
         data.process_checks.clear();
@@ -971,7 +931,6 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
     if config.services.len() > 32
         || config.process_checks.len() > 32
         || config.probes.len() > 32
-        || config.dns_checks.len() > 32
         || config.local_port_checks.len() > 32
     {
         return Err(invalid("at most 32 checks of each kind are allowed"));
@@ -1024,22 +983,6 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
             return Err(invalid("invalid process configuration"));
         }
     }
-    for check in &config.dns_checks {
-        if check.id.is_nil() || !ids.insert(check.id) {
-            return Err(invalid("DNS check IDs must be non-nil and unique"));
-        }
-        bounded(&check.name, 128, false)?;
-        bounded(&check.hostname, 253, false)?;
-        bounded(&check.record_type, 16, false)?;
-        if !matches!(check.record_type.as_str(), "A" | "AAAA")
-            || !(10..=86_400).contains(&check.interval_secs)
-            || check.timeout_ms == 0
-            || check.timeout_ms > 10_000
-            || check.timeout_ms >= check.interval_secs * 1000
-        {
-            return Err(invalid("invalid DNS check configuration"));
-        }
-    }
     for check in &config.local_port_checks {
         if check.id.is_nil() || !ids.insert(check.id) {
             return Err(invalid("local port check IDs must be non-nil and unique"));
@@ -1053,8 +996,13 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
         {
             return Err(invalid("invalid local port check configuration"));
         }
-        if let Some(address) = &check.address {
-            bounded(address, 128, false)?;
+        if check.address_scope.is_none()
+            || check.address_family.is_none()
+            || check.protocol.is_none()
+        {
+            return Err(invalid(
+                "v2 local port configuration requires scope, family, and protocol",
+            ));
         }
     }
     for probe in &config.probes {
@@ -1117,6 +1065,9 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
                 }
             }
             ProbeKind::Dns => {
+                if probe.dns.is_none() {
+                    return Err(invalid("DNS probe requires typed DNS options"));
+                }
                 if probe.target.len() > 253
                     || probe.target.starts_with('-')
                     || probe
@@ -1128,6 +1079,9 @@ pub(crate) fn validate_config(config: &NodeMonitoringConfig) -> Result<(), AppEr
                     return Err(invalid("DNS target must be a hostname without a port"));
                 }
             }
+        }
+        if probe.kind != ProbeKind::Dns && probe.dns.is_some() {
+            return Err(invalid("DNS options are only valid for DNS probes"));
         }
     }
     Ok(())
@@ -1171,7 +1125,6 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         || data.network_health.len() > 128
         || data.services.len() > 32
         || data.probes.len() > 128
-        || data.dns_checks.len() > 128
         || data.process_checks.len() > 32
         || data.local_port_checks.len() > 32
         || data.capabilities.len() > 32
@@ -1353,6 +1306,23 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         if probe.status == ProbeStatus::Success && probe.latency_ms.is_none() {
             return Err(invalid("successful probe needs a latency"));
         }
+        if probe.status == ProbeStatus::Success && probe.healthy.is_none() {
+            return Err(invalid("successful probe needs a health verdict"));
+        }
+        if probe.status != ProbeStatus::Success
+            && probe.healthy.is_some()
+            && probe.status != ProbeStatus::Failure
+        {
+            return Err(invalid(
+                "unknown probe status cannot report a health verdict",
+            ));
+        }
+        if probe.kind == ProbeKind::Dns && probe.dns.is_none() {
+            return Err(invalid("DNS probe result requires an observation"));
+        }
+        if probe.kind != ProbeKind::Dns && probe.dns.is_some() {
+            return Err(invalid("DNS observation is only valid for DNS probes"));
+        }
         if probe
             .http_status
             .is_some_and(|status| !(100..=599).contains(&status))
@@ -1363,51 +1333,15 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
             bounded_error(error)?;
         }
     }
-    let mut extension_sample_ids = HashSet::new();
-    for check in &data.dns_checks {
-        if check.id.is_nil()
-            || (require_v2_identity
-                && (check.sample_id.is_nil()
-                    || !extension_sample_ids.insert(check.sample_id)
-                    || check.config_revision > i64::MAX as u64
-                    || check.scheduled_at.is_none()
-                    || check.completed_at.is_none()))
-        {
-            return Err(invalid("invalid DNS check identity"));
-        }
-        bounded(&check.name, 128, false)?;
-        bounded(&check.hostname, 253, false)?;
-        bounded(&check.record_type, 16, false)?;
-        nonnegative(check.latency_ms)?;
-        if let Some(checked_at) = check.checked_at
-            && (checked_at < earliest || checked_at > latest)
-        {
-            return Err(invalid("DNS check time outside accepted window"));
-        }
-        if let (Some(scheduled), Some(completed)) = (check.scheduled_at, check.completed_at)
-            && (scheduled < earliest
-                || scheduled > latest
-                || completed < scheduled
-                || completed > latest)
-        {
-            return Err(invalid("DNS check timestamps outside accepted window"));
-        }
-        if check.status == CheckStatus::Ok && check.latency_ms.is_none() {
-            return Err(invalid("successful DNS check needs a latency"));
-        }
-        if let Some(error) = &check.error {
-            bounded_error(error)?;
-        }
-        for answer in &check.answers {
-            bounded(answer, 256, false)?;
-        }
-    }
+    let mut extension_sample_ids = sample_ids;
     for check in &data.process_checks {
         if check.id.is_nil()
             || (require_v2_identity
-                && (check.sample_id.is_nil()
-                    || !extension_sample_ids.insert(check.sample_id)
-                    || check.config_revision > i64::MAX as u64
+                && (check.sample_id.is_none()
+                    || !extension_sample_ids.insert(check.sample_id.unwrap())
+                    || check
+                        .config_revision
+                        .is_none_or(|revision| revision > i64::MAX as u64)
                     || check.scheduled_at.is_none()
                     || check.completed_at.is_none()))
         {
@@ -1431,6 +1365,14 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         if let Some(error) = &check.error {
             bounded_error(error)?;
         }
+        if check.status == CheckStatus::Ok && check.healthy.is_none() {
+            return Err(invalid("successful process check needs a health verdict"));
+        }
+        if check.status != CheckStatus::Ok && check.healthy.is_some() {
+            return Err(invalid(
+                "unknown process check cannot report a health verdict",
+            ));
+        }
         if check.count.is_some_and(|value| value > 1_000_000)
             || check.expected_count.is_some_and(|value| value > 1_000_000)
         {
@@ -1441,17 +1383,31 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         if check.id.is_nil()
             || check.port == 0
             || (require_v2_identity
-                && (check.sample_id.is_nil()
-                    || !extension_sample_ids.insert(check.sample_id)
-                    || check.config_revision > i64::MAX as u64
+                && (check.sample_id.is_none()
+                    || !extension_sample_ids.insert(check.sample_id.unwrap())
+                    || check
+                        .config_revision
+                        .is_none_or(|revision| revision > i64::MAX as u64)
                     || check.scheduled_at.is_none()
                     || check.completed_at.is_none()))
         {
             return Err(invalid("invalid local port check identity or port"));
         }
         bounded(&check.name, 128, false)?;
-        if let Some(address) = &check.address {
-            bounded(address, 128, false)?;
+        if require_v2_identity
+            && (check.address_scope.is_none()
+                || check.address_family.is_none()
+                || check.protocol.is_none())
+        {
+            return Err(invalid(
+                "v2 local port result requires scope, family, and protocol",
+            ));
+        }
+        for address in &check.observed_addresses {
+            bounded(address, 64, false)?;
+        }
+        if check.observed_addresses.len() > 64 {
+            return Err(invalid("local port observation has too many addresses"));
         }
         nonnegative(check.latency_ms)?;
         if let Some(checked_at) = check.checked_at
@@ -1471,6 +1427,16 @@ pub(crate) fn validate_data(data: &MonitoringData) -> Result<(), AppError> {
         }
         if let Some(error) = &check.error {
             bounded_error(error)?;
+        }
+        if check.status == CheckStatus::Ok && check.healthy.is_none() {
+            return Err(invalid(
+                "successful local port check needs a health verdict",
+            ));
+        }
+        if check.status != CheckStatus::Ok && check.healthy.is_some() {
+            return Err(invalid(
+                "unknown local port check cannot report a health verdict",
+            ));
         }
     }
     Ok(())
@@ -1493,6 +1459,7 @@ mod tests {
             timeout_ms: 1000,
             expected_status: Some(200),
             response_contains: None,
+            dns: None,
         }
     }
 
@@ -1510,10 +1477,16 @@ mod tests {
             kind: ProbeKind::Http,
             scheduled_at: at,
             completed_at: at,
-            status,
+            status: status.clone(),
+            healthy: match status {
+                ProbeStatus::Success => Some(true),
+                ProbeStatus::Failure => Some(false),
+                _ => None,
+            },
             latency_ms: latency,
             http_status: None,
             error: None,
+            dns: None,
         }
     }
 

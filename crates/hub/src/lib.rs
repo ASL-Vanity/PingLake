@@ -602,7 +602,6 @@ async fn agent_monitoring_config(
         .ok_or_else(AppError::unauthorized)?;
     if schema_max < 2 {
         let mut legacy = config;
-        legacy.dns_checks.clear();
         legacy.process_checks.clear();
         legacy.local_port_checks.clear();
         legacy.probes.retain(|probe| {
@@ -715,10 +714,14 @@ async fn check_statistics(
         return Err(AppError::bad_request("invalid check statistics kind"));
     }
     tokio::task::spawn_blocking(move || {
-        state
-            .inner
-            .database
-            .check_statistics(id, query.minutes, query.kind.as_deref())
+        state.inner.database.check_statistics(
+            id,
+            query.minutes,
+            query
+                .kind
+                .as_deref()
+                .map(|kind| if kind == "dns" { "probe" } else { kind }),
+        )
     })
     .await
     .map_err(|error| AppError::Internal(error.into()))??

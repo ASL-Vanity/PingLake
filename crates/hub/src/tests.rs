@@ -6,11 +6,12 @@ use axum::{
 use chrono::Utc;
 use http_body_util::BodyExt;
 use pinglake_protocol::{
-    AlertKind, AlertRecord, AlertSettings, CheckStatus, CpuCore, DnsCheck, DnsResult,
-    EnrollRequest, HistoryPoint, HostGroup, LocalPortCheck, LocalPortResult, MetricReport,
-    MetricStatus, MonitoringData, MonitoringHistoryPoint, NodeMonitoringConfig, NodeSnapshot,
-    ProbeKind, ProbeResult, ProbeStatistics, ProbeStatus, ProbeTarget, ProcessCheck, ProcessResult,
-    ServiceCheck, ServiceResult,
+    AlertKind, AlertRecord, AlertSettings, CheckStatus, CpuCore, DnsProbeOptions, DnsRecordType,
+    EnrollRequest, HistoryPoint, HostGroup, LocalPortAddressFamily, LocalPortAddressScope,
+    LocalPortCheck, LocalPortProtocol, LocalPortResult, MetricReport, MetricStatus, MonitoringData,
+    MonitoringHistoryPoint, NodeMonitoringConfig, NodeSnapshot, ProbeKind, ProbeResult,
+    ProbeStatistics, ProbeStatus, ProbeTarget, ProcessCheck, ProcessResult, ServiceCheck,
+    ServiceResult,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -749,6 +750,7 @@ async fn extended_samples_and_probe_ids_are_deduplicated_with_scoped_history() {
             timeout_ms: 5000,
             expected_status: Some(200),
             response_contains: None,
+            dns: None,
         }],
         ..Default::default()
     };
@@ -784,9 +786,11 @@ async fn extended_samples_and_probe_ids_are_deduplicated_with_scoped_history() {
             scheduled_at: at,
             completed_at: at,
             status: ProbeStatus::Success,
+            healthy: Some(true),
             latency_ms: Some(42.0),
             http_status: Some(200),
             error: None,
+            dns: None,
         }],
         ..Default::default()
     });
@@ -913,15 +917,21 @@ async fn v2_extension_checks_have_scoped_http_history_and_conflict_rejection() {
     let process_id = Uuid::new_v4();
     let port_id = Uuid::new_v4();
     let config = NodeMonitoringConfig {
-        dns_checks: vec![DnsCheck {
+        probes: vec![ProbeTarget {
             id: dns_id,
             name: "DNS".into(),
-            hostname: "example.com".into(),
-            record_type: "A".into(),
-            expected_value: None,
+            kind: ProbeKind::Dns,
+            target: "example.com".into(),
+            port: None,
             enabled: true,
             interval_secs: 30,
             timeout_ms: 1000,
+            expected_status: None,
+            response_contains: None,
+            dns: Some(DnsProbeOptions {
+                record_type: DnsRecordType::A,
+                expected_value: None,
+            }),
         }],
         process_checks: vec![ProcessCheck {
             id: process_id,
@@ -936,7 +946,9 @@ async fn v2_extension_checks_have_scoped_http_history_and_conflict_rejection() {
         local_port_checks: vec![LocalPortCheck {
             id: port_id,
             name: "HTTP".into(),
-            address: None,
+            address_scope: Some(LocalPortAddressScope::AnyLocal),
+            address_family: Some(LocalPortAddressFamily::Any),
+            protocol: Some(LocalPortProtocol::Tcp),
             port: 8080,
             enabled: true,
             interval_secs: 30,
@@ -965,31 +977,34 @@ async fn v2_extension_checks_have_scoped_http_history_and_conflict_rejection() {
         session_id: Uuid::new_v4(),
         sample_sequence: 1,
         report_interval_secs: 5,
-        dns_checks: vec![DnsResult {
-            id: dns_id,
-            name: "DNS".into(),
+        probes: vec![ProbeResult {
             sample_id: dns_sample,
+            target_id: dns_id,
             config_revision: saved.revision,
-            scheduled_at: Some(at),
-            completed_at: Some(at),
-            checked_at: Some(at),
-            status: CheckStatus::Unavailable,
-            hostname: "example.com".into(),
-            record_type: "A".into(),
-            answers: vec![],
+            kind: ProbeKind::Dns,
+            scheduled_at: at,
+            completed_at: at,
+            status: ProbeStatus::Failure,
+            healthy: Some(false),
             latency_ms: None,
+            http_status: None,
             error: Some("timeout".into()),
-            reason: None,
+            dns: Some(pinglake_protocol::DnsObservation {
+                record_type: DnsRecordType::A,
+                rcode: None,
+                answers: vec![],
+            }),
         }],
         process_checks: vec![ProcessResult {
             id: process_id,
             name: "worker".into(),
-            sample_id: process_sample,
-            config_revision: saved.revision,
+            sample_id: Some(process_sample),
+            config_revision: Some(saved.revision),
             scheduled_at: Some(at),
             completed_at: Some(at),
             checked_at: Some(at),
             status: CheckStatus::Unavailable,
+            healthy: None,
             process_name: "worker".into(),
             count: None,
             expected_count: None,
@@ -999,14 +1014,18 @@ async fn v2_extension_checks_have_scoped_http_history_and_conflict_rejection() {
         local_port_checks: vec![LocalPortResult {
             id: port_id,
             name: "HTTP".into(),
-            sample_id: port_sample,
-            config_revision: saved.revision,
+            sample_id: Some(port_sample),
+            config_revision: Some(saved.revision),
             scheduled_at: Some(at),
             completed_at: Some(at),
             checked_at: Some(at),
             status: CheckStatus::Unavailable,
-            address: None,
+            healthy: None,
+            address_scope: Some(LocalPortAddressScope::AnyLocal),
+            address_family: Some(LocalPortAddressFamily::Any),
+            protocol: Some(LocalPortProtocol::Tcp),
             port: 8080,
+            observed_addresses: vec![],
             latency_ms: None,
             error: Some("closed".into()),
             reason: None,
