@@ -8,9 +8,8 @@ use std::{
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use pinglake_protocol::{
-    AgentHealth, Capability, CheckStatus, LocalPortResult, MetricReport, MetricStatus,
-    MonitoringData, NodeMonitoringConfig, ProbeKind, ProbeResult, ProbeTarget, ProcessResult,
-    ServiceResult,
+    AgentHealth, Capability, MetricReport, MetricStatus, MonitoringData, NodeMonitoringConfig,
+    ProbeKind, ProbeResult, ProbeTarget, ServiceResult,
 };
 use rand::Rng;
 use tokio::{sync::Notify, task::JoinSet};
@@ -21,6 +20,7 @@ use crate::{
     client::{ApiClient, SendError},
     metrics::MetricCollector,
     probes::{ProbePolicy, run_probe, validate_target},
+    services::{check_local_ports, check_processes},
     spool::Spool,
     state::AgentState,
 };
@@ -241,87 +241,9 @@ async fn collect_loop(
         data.agent = shared.health.clone();
         data.services = shared.services.clone();
         data.probes = shared.probes.iter().cloned().collect();
-        let process_ids = shared
-            .config
-            .process_checks
-            .iter()
-            .map(|check| check.id)
-            .collect::<HashSet<_>>();
-        data.process_checks = shared
-            .services
-            .iter()
-            .filter(|service| process_ids.contains(&service.id))
-            .map(|service| ProcessResult {
-                id: service.id,
-                name: service.name.clone(),
-                sample_id: Some(Uuid::new_v4()),
-                config_revision: Some(service.config_revision),
-                scheduled_at: Some(service.checked_at),
-                completed_at: Some(service.checked_at),
-                checked_at: Some(service.checked_at),
-                healthy: service.healthy,
-                status: match service.status {
-                    MetricStatus::Ok => CheckStatus::Ok,
-                    MetricStatus::PermissionDenied => CheckStatus::PermissionDenied,
-                    MetricStatus::Unsupported => CheckStatus::Unsupported,
-                    MetricStatus::Stale => CheckStatus::Stale,
-                    MetricStatus::WarmingUp => CheckStatus::WarmingUp,
-                    MetricStatus::Unavailable => CheckStatus::Unavailable,
-                },
-                process_name: shared
-                    .config
-                    .process_checks
-                    .iter()
-                    .find(|check| check.id == service.id)
-                    .map(|check| check.process_name.clone())
-                    .unwrap_or_default(),
-                count: Some((service.state == "running") as u32),
-                expected_count: shared
-                    .config
-                    .process_checks
-                    .iter()
-                    .find(|check| check.id == service.id)
-                    .and_then(|check| check.expected_count),
-                error: service.error.clone(),
-                reason: service.error.clone(),
-            })
-            .collect();
-        data.local_port_checks = shared
-            .config
-            .local_port_checks
-            .iter()
-            .filter(|check| check.enabled)
-            .map(|check| {
-                let listening = data.tcp.listening_port_numbers.contains(&check.port);
-                LocalPortResult {
-                    id: check.id,
-                    name: check.name.clone(),
-                    sample_id: Some(Uuid::new_v4()),
-                    config_revision: Some(shared.config.revision),
-                    scheduled_at: Some(report.collected_at),
-                    completed_at: Some(report.collected_at),
-                    checked_at: Some(report.collected_at),
-                    status: CheckStatus::Ok,
-                    healthy: Some(listening),
-                    address_scope: check.address_scope.clone(),
-                    address_family: check.address_family,
-                    protocol: check.protocol,
-                    observed_addresses: Vec::new(),
-                    port: check.port,
-                    latency_ms: None,
-                    error: if listening {
-                        None
-                    } else {
-                        Some("port is not listening".into())
-                    },
-                    reason: if listening {
-                        None
-                    } else {
-                        Some("not_listening".into())
-                    },
-                }
-            })
-            .collect();
+        let check_config = shared.config.clone();
+        data.process_checks = check_processes(&check_config);
+        data.local_port_checks = check_local_ports(&check_config);
         if data.schema_version < 2 {
             downgrade_monitoring_to_v1(data);
         }
@@ -348,6 +270,7 @@ fn downgrade_monitoring_to_v1(data: &mut MonitoringData) {
     data.local_port_checks.clear();
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_loop(
     client: ApiClient,
     state: AgentState,
@@ -677,6 +600,7 @@ fn fit_report_budget(report: &mut MetricReport) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pinglake_protocol::{LocalPortResult, ProcessResult};
     #[test]
     fn queue_is_bounded_and_drops_oldest_not_newest() {
         let mut shared = Shared::default();

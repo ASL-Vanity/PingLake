@@ -13,6 +13,7 @@ pub const MAX_CAPACITY: usize = 4096;
 pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
 pub const MAX_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct SpoolItem {
     pub id: i64,
@@ -20,12 +21,14 @@ pub struct SpoolItem {
     pub queued_at: DateTime<Utc>,
 }
 
+#[allow(dead_code)]
 pub struct Spool {
     path: PathBuf,
     capacity: usize,
     ttl: Duration,
 }
 
+#[allow(dead_code)]
 impl Spool {
     pub fn open(path: impl Into<PathBuf>, agent_id: &str, hub: &str) -> Result<Self> {
         let path = path.into();

@@ -35,6 +35,7 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
+    #[allow(dead_code)]
     pub fn binding(&self) -> String {
         self.enroll_url.origin().ascii_serialization()
     }
@@ -77,6 +78,7 @@ impl ApiClient {
         response.json().await.map_err(transport_error)
     }
 
+    #[allow(dead_code)]
     pub async fn send_metrics(
         &self,
         agent_id: Uuid,

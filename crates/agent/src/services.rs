@@ -81,7 +81,7 @@ fn local_port_result(check: &LocalPortCheck, revision: u64) -> LocalPortResult {
     );
     let mut bindings = observation.bindings;
     bindings.retain(|binding| address_matches(binding.local_address, check));
-    let healthy = (observation.status == ObservationStatus::Ok).then(|| !bindings.is_empty());
+    let healthy = (observation.status == ObservationStatus::Ok).then_some(!bindings.is_empty());
     let status = match observation.status {
         ObservationStatus::Ok => CheckStatus::Ok,
         ObservationStatus::PermissionDenied => CheckStatus::PermissionDenied,
