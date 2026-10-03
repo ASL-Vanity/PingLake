@@ -111,6 +111,9 @@ try {
     )) {
         Copy-RequiredFile -Source (Join-Path $repoRoot $relativePath) -DestinationDirectory $staging
     }
+    $docsDestination = Join-Path $staging 'docs'
+    New-Item -ItemType Directory -Force -Path $docsDestination | Out-Null
+    Copy-RequiredFile -Source (Join-Path $repoRoot 'docs\USER_GUIDE.md') -DestinationDirectory $docsDestination
     Write-Sha256Manifest -Directory $staging
 
     if (Test-Path -LiteralPath $output) {

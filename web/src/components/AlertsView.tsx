@@ -1,5 +1,5 @@
-import { AlertTriangle, CheckCircle2, CircleDot, Search } from "lucide-react";
 import { useMemo, useState } from "react";
+import { AppIcon } from "./AppIcon";
 import type { AlertKind, AlertRecord } from "../types";
 import { formatDateTime, formatRelativeTime } from "../utils";
 
@@ -28,35 +28,37 @@ export function AlertsView({ alerts, onOpenNode }: AlertsViewProps) {
     });
   }, [alerts, filter, query]);
 
+  const activeCount = alerts.filter((alert) => alert.active).length;
+
   return (
     <section className="data-panel alerts-panel" aria-labelledby="alerts-heading">
       <div className="panel-toolbar">
-        <div><h2 id="alerts-heading">告警</h2><span>{filtered.length} 条记录</span></div>
+        <div><h2 id="alerts-heading">告警</h2><span>{activeCount ? `${activeCount} 条活动告警` : "当前无活动告警"}</span></div>
         <div className="table-controls">
           <div className="segmented-control" aria-label="告警筛选">
             {(["active", "all", "resolved"] as const).map((value) => (
-              <button type="button" className={filter === value ? "active" : ""} onClick={() => setFilter(value)} key={value}>
+              <button type="button" className={filter === value ? "active" : ""} aria-pressed={filter === value} onClick={() => setFilter(value)} key={value}>
                 {value === "active" ? "活动" : value === "all" ? "全部" : "已恢复"}
               </button>
             ))}
           </div>
           <label className="search-field">
-            <Search size={15} />
+            <AppIcon name="search" size={15} />
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索告警" aria-label="搜索告警" />
           </label>
         </div>
       </div>
       {filtered.length === 0 ? (
         <div className="alerts-empty">
-          <CheckCircle2 size={24} />
+          <AppIcon name="check" size={24} />
           <strong>{filter === "active" ? "当前没有活动告警" : "没有匹配的告警"}</strong>
         </div>
       ) : (
         <div className="alert-list">
           {filtered.map((alert) => (
-            <button type="button" className="alert-row" onClick={() => onOpenNode(alert.node_id)} key={alert.id}>
-              <span className={`alert-icon ${alert.active ? "active" : "resolved"}`}>
-                {alert.active ? <AlertTriangle size={17} /> : <CheckCircle2 size={17} />}
+            <button type="button" className={`alert-row ${alert.active ? "active" : "resolved"} alert-${alert.kind}`} onClick={() => onOpenNode(alert.node_id)} key={alert.id} aria-label={`${alert.node_name} ${kindLabels[alert.kind]}告警，${alert.active ? "活动" : "已恢复"}`}>
+              <span className={`alert-icon ${alert.active ? "active" : "resolved"}`} aria-hidden="true">
+                {alert.active ? <AppIcon name="warning" size={17} /> : <AppIcon name="check" size={17} />}
               </span>
               <span className="alert-state">
                 <strong>{alert.active ? "活动" : "已恢复"}</strong>
@@ -68,7 +70,8 @@ export function AlertsView({ alerts, onOpenNode }: AlertsViewProps) {
                 {alert.threshold != null && <small>阈值 {formatAlertValue(alert.kind, alert.threshold)}</small>}
               </span>
               <span className="alert-time" title={formatDateTime(alert.opened_at)}>
-                <CircleDot size={12} />{formatRelativeTime(alert.opened_at)}
+                <AppIcon name="timeline" size={12} /><span>{formatRelativeTime(alert.opened_at)}</span>
+                <small>{alert.active ? "触发" : alert.resolved_at ? `恢复于 ${formatDateTime(alert.resolved_at)}` : "已恢复"}</small>
               </span>
             </button>
           ))}

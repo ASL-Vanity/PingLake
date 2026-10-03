@@ -1,8 +1,18 @@
 # PingLake
 
-PingLake 是面向少量到中等规模 Windows/Linux 主机的实时状态监控系统。它由一个中心 Hub、每台主机上的只读 Agent 和同源 Web 控制台组成。
+PingLake 是面向少量到中等规模 Windows/Linux 主机的实时状态监控系统。
 
-Agent 主动连接 Hub，因此被监控节点不需要域名、固定公网地址或入站端口。只有 Hub 需要被这些节点访问；跨公网部署时必须使用 HTTPS。
+> **v0.2.0** · [GitHub Releases](https://github.com/ASL-Vanity/PingLake/releases) · [详细使用手册](docs/USER_GUIDE.md)
+
+它由一个中心 Hub、每台主机上的只读 Agent 和同源 Web 控制台组成。
+
+Agent 主动连接 Hub，因此被监控节点不需要域名、固定公网地址或入站端口。所有 Agent 连接同一个 Hub；跨公网部署时必须使用 HTTPS。
+
+## v0.2.0 前端工作台
+
+本版本保留认证、节点监控、实时推送、告警、分组、历史图表和通知配置能力，全面更新展示层：桌面侧栏/顶部导航、移动端抽屉与底部导航、卡片和列表节点视图、节点详情与告警中心、响应式登录页、缺失采样占位和统一异常状态。主题入口支持 Obsidian 曜石、Porcelain 云瓷、Lagoon 深海、Amber 琥珀及跟随系统。主题保存在 `localStorage["pinglake.theme"]`，旧的 `light`、`dark`、`midnight`、`circuit` 值会自动迁移。
+
+完整的安装、节点接入、主题、SMTP、Webhook、告警阈值、升级、备份和排错步骤见 [详细使用手册](docs/USER_GUIDE.md)。
 
 ## 功能
 
@@ -10,14 +20,15 @@ Agent 主动连接 Hub，因此被监控节点不需要域名、固定公网地�
 - CPU、内存、Swap、磁盘、网络、温度、负载、进程数和运行时间
 - 实时状态推送与 1/6/24 小时历史图表
 - CPU、内存、磁盘、温度和离线告警
-- 通用 JSON Webhook 通知
+- 通用 JSON Webhook 与 SMTP 邮件通知（活动告警和恢复事件）
 - SQLite 单文件存储，默认保留 7 天原始数据
 - Agent 密钥哈希存储、管理员会话、只读采集
 - Docker Hub 部署与 Windows/Linux 系统服务安装脚本
+- v0.2.0 全面重做的响应式控制台、四套主题、卡片/列表节点视图和新的 PingLake 品牌资源
 
 ## 快速启动 Hub
 
-1. 复制 `.env.example` 为 `.env`，替换两个密码字段并设置 `PINGLAKE_DOMAIN`。
+1. 复制 `.env.example` 为 `.env`，设置 `PINGLAKE_ADMIN_PASSWORD`、`PINGLAKE_ENROLLMENT_TOKEN` 和 `PINGLAKE_DOMAIN`。两个秘密值至少 16 个字节；PingLake 没有默认密码。
 2. 将域名 A/AAAA 记录指向 Hub 云服务器，并开放 TCP `80/443` 与 UDP `443`。
 3. 启动：
 
@@ -25,7 +36,7 @@ Agent 主动连接 Hub，因此被监控节点不需要域名、固定公网地�
 docker compose -f docker-compose.yml -f deploy/docker-compose.tls.yml up -d --build
 ```
 
-访问 `https://你的域名`，使用 `.env` 中的管理员密码登录。
+访问 `https://你的域名`，在登录页输入 `.env` 中的 `PINGLAKE_ADMIN_PASSWORD`。当前版本只有管理员密码登录，没有 username 字段、多用户账户或密码找回功能。
 
 仅限可信内网或临时测试的 IP 模式：
 
@@ -40,7 +51,7 @@ docker compose up -d --build hub
 
 然后访问 `http://Hub-IP:8090`。不要在公网长期使用明文 HTTP。
 
-基础 Compose 文件不加载 Caddy，因此无域名的 IP 模式不会要求 `PINGLAKE_DOMAIN`。TLS 覆盖文件会在启动前拒绝空域名。Compose 的 `healthcheck` 目前是 Hub API 存活检查，不能证明 SQLite 在磁盘满、只读或运行时 I/O 失败后仍可写入；生产环境仍应对 Hub 建立外部 HTTPS 探测并配置磁盘告警。
+基础 Compose 文件不加载 Caddy，因此无域名的 IP 模式不会要求 `PINGLAKE_DOMAIN`。TLS 覆盖文件会在启动前拒绝空域名。Compose 的 `healthcheck` 会访问 Hub API 并读取 settings 表，能确认服务和数据库基本可读；它不能证明 SQLite 在磁盘满、只读或运行时 I/O 失败后仍可写入。生产环境仍应对 Hub 建立外部 HTTPS 探测并配置磁盘告警。
 
 ## 安装 Agent
 
@@ -101,6 +112,24 @@ $env:PINGLAKE_ENROLLMENT_TOKEN='development-enrollment-token'
 cargo run -p pinglake-agent -- `
   --state-dir .\data\agent-dev
 ```
+
+## 常用命令
+
+更新（保留数据 volume）：
+
+```powershell
+git pull
+docker compose -f docker-compose.yml -f deploy/docker-compose.tls.yml up -d --build
+```
+
+查看状态与日志：
+
+```powershell
+docker compose ps
+docker compose logs --tail=200 hub caddy
+```
+
+不要使用 `docker compose down -v`，否则会删除 SQLite 数据 volume。
 
 ## 安全边界
 

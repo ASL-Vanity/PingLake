@@ -1,5 +1,4 @@
-import { ArrowDown, ArrowUp, ChevronRight, Cpu, MemoryStick, Monitor, Plus, Search, Server } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { HostGroup, NodeSnapshot } from "../types";
 import {
   formatDateTime,
@@ -9,10 +8,10 @@ import {
   formatRelativeTime,
   nodeDiskPercent,
   nodeMemoryPercent,
-  osLabel,
 } from "../utils";
 import { EmptyNodes } from "./EmptyNodes";
 import { MetricBar } from "./MetricBar";
+import { AppIcon } from "./AppIcon";
 
 interface NodeTableProps {
   nodes: NodeSnapshot[];
@@ -22,6 +21,8 @@ interface NodeTableProps {
   onAssignGroup: (nodeId: string, groupId: string | null) => Promise<void>;
 }
 
+type NodeViewMode = "cards" | "list";
+
 export function NodeTable({ nodes, groups, onSelect, onCreateGroup, onAssignGroup }: NodeTableProps) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<"all" | "online" | "offline">("all");
@@ -29,6 +30,22 @@ export function NodeTable({ nodes, groups, onSelect, onCreateGroup, onAssignGrou
   const [newGroupName, setNewGroupName] = useState("");
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [groupError, setGroupError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<NodeViewMode>(() => {
+    try {
+      const stored = window.localStorage.getItem("pinglake.node-view");
+      return stored === "list" ? "list" : "cards";
+    } catch {
+      return "cards";
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("pinglake.node-view", viewMode);
+    } catch {
+      // Storage may be unavailable in privacy-restricted browser contexts.
+    }
+  }, [viewMode]);
 
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -66,24 +83,34 @@ export function NodeTable({ nodes, groups, onSelect, onCreateGroup, onAssignGrou
         <div className="table-controls">
           <div className="segmented-control" aria-label="主机状态筛选">
             {(["all", "online", "offline"] as const).map((value) => (
-              <button type="button" className={status === value ? "active" : ""} onClick={() => setStatus(value)} key={value}>
+              <button type="button" className={status === value ? "active" : ""} aria-pressed={status === value} onClick={() => setStatus(value)} key={value}>
                 {value === "all" ? "全部" : value === "online" ? "在线" : "离线"}
               </button>
             ))}
           </div>
           <label className="group-filter"><span>分组</span><select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}><option value="all">全部分组</option><option value="ungrouped">未分组</option>{groups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select></label>
-          <label className="search-field"><Search size={15} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索主机" aria-label="搜索主机" /></label>
+          <label className="search-field"><AppIcon name="search" size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索主机" aria-label="搜索主机" /></label>
+          <div className="view-toggle" aria-label="节点视图">
+            <button type="button" className={viewMode === "cards" ? "active" : ""} aria-pressed={viewMode === "cards"} onClick={() => setViewMode("cards")} title="卡片视图"><AppIcon name="grid" size={15} /><span className="sr-only">卡片视图</span></button>
+            <button type="button" className={viewMode === "list" ? "active" : ""} aria-pressed={viewMode === "list"} onClick={() => setViewMode("list")} title="列表视图"><AppIcon name="list" size={15} /><span className="sr-only">列表视图</span></button>
+          </div>
         </div>
       </div>
       <div className="group-create-row">
         <label><span>新建分组</span><input value={newGroupName} maxLength={64} onChange={(event) => setNewGroupName(event.target.value)} placeholder="例如：邮件、数据库、测试" onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void createGroup(); } }} /></label>
-        <button type="button" className="secondary-button" onClick={() => void createGroup()} disabled={!newGroupName.trim() || creatingGroup}><Plus size={15} />{creatingGroup ? "创建中" : "创建分组"}</button>
+        <button type="button" className="secondary-button" onClick={() => void createGroup()} disabled={!newGroupName.trim() || creatingGroup}><AppIcon name="plus" size={15} />{creatingGroup ? "创建中" : "创建分组"}</button>
         {groupError && <span className="group-error" role="alert">{groupError}</span>}
       </div>
       {filtered.length === 0 ? <div className="filtered-empty">没有匹配的主机</div> : (
-        <div className="server-card-grid">
-          {filtered.map((node) => <HostCard key={node.id} node={node} groups={groups} onSelect={onSelect} onAssignGroup={onAssignGroup} />)}
-        </div>
+        viewMode === "cards" ? (
+          <div className="server-card-grid" role="list" aria-label="主机卡片">
+            {filtered.map((node) => <HostCard key={node.id} node={node} groups={groups} onSelect={onSelect} onAssignGroup={onAssignGroup} />)}
+          </div>
+        ) : (
+          <div className="server-list" role="list" aria-label="主机列表">
+            {filtered.map((node) => <HostListRow key={node.id} node={node} groups={groups} onSelect={onSelect} onAssignGroup={onAssignGroup} />)}
+          </div>
+        )
       )}
     </section>
   );
@@ -96,25 +123,58 @@ function HostCard({ node, groups, onSelect, onAssignGroup }: {
   onAssignGroup: (nodeId: string, groupId: string | null) => Promise<void>;
 }) {
   const latest = node.latest;
-  const systemIcon = node.os.toLowerCase().includes("windows") ? <Monitor size={16} /> : <Server size={16} />;
+  const systemIcon = node.os.toLowerCase().includes("windows") ? <AppIcon name="monitor" size={16} /> : <AppIcon name="server" size={16} />;
   return (
-    <article className={`server-card ${node.online ? "online" : "offline"}`}>
+    <article className={`server-card ${node.online ? "online" : "offline"}`} role="listitem">
       <button type="button" className="server-card-main" onClick={() => onSelect(node)} aria-label={`打开 ${node.display_name || node.hostname} 的详情`}>
         <header>
           <div className="node-identity"><span className={`status-dot ${node.online ? "online" : "offline"}`} /><div><strong>{node.display_name || node.hostname}</strong><span>{node.hostname}</span></div></div>
-          <ChevronRight size={17} />
+          <AppIcon name="chevron-right" size={17} />
         </header>
         <div className="server-card-context"><span>{systemIcon}{formatOperatingSystem(node.os, node.os_version || node.architecture)}</span>{node.group_name && <b>{node.group_name}</b>}</div>
         <div className="server-card-metrics">
-          <MetricBar value={latest?.cpu_percent ?? 0} compact label="CPU" />
-          <MetricBar value={nodeMemoryPercent(node)} compact label="内存" />
-          <MetricBar value={nodeDiskPercent(node)} compact label="磁盘" />
-          <div className="card-network"><span><ArrowDown size={13} /><b>下行</b>{formatRate(latest?.network_received_bytes_per_sec)}</span><span><ArrowUp size={13} /><b>上行</b>{formatRate(latest?.network_transmitted_bytes_per_sec)}</span></div>
+          <MetricBar value={latest?.cpu_percent} compact label="CPU" />
+          <MetricBar value={latest ? nodeMemoryPercent(node) : null} compact label="内存" />
+          <MetricBar value={latest ? nodeDiskPercent(node) : null} compact label="磁盘" />
+          <div className="card-network"><span><AppIcon name="download" size={13} /><b>下行</b>{formatRate(latest?.network_received_bytes_per_sec)}</span><span><AppIcon name="upload" size={13} /><b>上行</b>{formatRate(latest?.network_transmitted_bytes_per_sec)}</span></div>
           <div className="card-latency"><span>Hub latency</span><strong>{formatLatency(latest?.hub_latency_ms)}</strong></div>
         </div>
       </button>
       <footer>
         <label>分组<select value={node.group_id ?? ""} onClick={(event) => event.stopPropagation()} onChange={(event) => void onAssignGroup(node.id, event.target.value || null)}><option value="">未分组</option>{groups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select></label>
+        <span title={formatDateTime(node.last_seen_at)}>{node.online ? "心跳 " : "最后心跳 "}{formatRelativeTime(node.last_seen_at)}</span>
+      </footer>
+    </article>
+  );
+}
+
+function HostListRow({ node, groups, onSelect, onAssignGroup }: {
+  node: NodeSnapshot;
+  groups: HostGroup[];
+  onSelect: (node: NodeSnapshot) => void;
+  onAssignGroup: (nodeId: string, groupId: string | null) => Promise<void>;
+}) {
+  const latest = node.latest;
+  const systemIcon = node.os.toLowerCase().includes("windows") ? <AppIcon name="monitor" size={15} /> : <AppIcon name="server" size={15} />;
+  const nodeName = node.display_name || node.hostname;
+  return (
+    <article className={`server-list-row ${node.online ? "online" : "offline"}`} role="listitem">
+      <button type="button" className="server-list-main" onClick={() => onSelect(node)} aria-label={`打开 ${nodeName} 的详情`}>
+        <span className="server-list-identity">
+          <span className={`status-dot ${node.online ? "online" : "offline"}`} aria-hidden="true" />
+          <span><strong>{nodeName}</strong><small>{node.hostname}</small></span>
+        </span>
+        <span className="server-list-os">{systemIcon}{formatOperatingSystem(node.os, node.os_version || node.architecture)}</span>
+        <span className="server-list-status">{node.online ? "在线" : "离线"}</span>
+        <span className="server-list-metric"><MetricBar value={latest?.cpu_percent} compact label="CPU" /></span>
+        <span className="server-list-metric"><MetricBar value={latest ? nodeMemoryPercent(node) : null} compact label="内存" /></span>
+        <span className="server-list-metric"><MetricBar value={latest ? nodeDiskPercent(node) : null} compact label="磁盘" /></span>
+        <span className="server-list-network"><AppIcon name="download" size={13} />{formatRate(latest?.network_received_bytes_per_sec)}<AppIcon name="upload" size={13} />{formatRate(latest?.network_transmitted_bytes_per_sec)}</span>
+        <AppIcon name="chevron-right" size={17} className="row-chevron" />
+      </button>
+      <footer className="server-list-footer">
+        {node.group_name && <span className="node-group-chip">{node.group_name}</span>}
+        <label><span className="sr-only">{nodeName} 分组</span><select value={node.group_id ?? ""} onClick={(event) => event.stopPropagation()} onChange={(event) => void onAssignGroup(node.id, event.target.value || null)}><option value="">未分组</option>{groups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select></label>
         <span title={formatDateTime(node.last_seen_at)}>{node.online ? "心跳 " : "最后心跳 "}{formatRelativeTime(node.last_seen_at)}</span>
       </footer>
     </article>

@@ -1,22 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowDown,
-  ArrowLeft,
-  ArrowUp,
-  Box,
-  Check,
-  Cpu,
-  HardDrive,
-  ListTree,
-  MemoryStick,
-  Network,
-  Pencil,
-  RefreshCw,
-  Thermometer,
-  Trash2,
-  X,
-} from "lucide-react";
-import {
   CartesianGrid,
   Line,
   LineChart,
@@ -44,6 +27,7 @@ import {
   ratioPercent,
 } from "../utils";
 import { MetricBar } from "./MetricBar";
+import { AppIcon } from "./AppIcon";
 
 interface NodeDetailProps {
   node: NodeSnapshot;
@@ -155,7 +139,7 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
     <div className="detail-view">
       <header className="detail-header">
         <button type="button" className="icon-button" onClick={onBack} aria-label="返回节点列表" title="返回节点列表">
-          <ArrowLeft size={18} />
+          <AppIcon name="back" size={18} />
         </button>
         <div className="detail-title">
           <div className="detail-title-line">
@@ -163,11 +147,11 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
             {editingName ? (
               <div className="node-name-editor">
                 <input value={nameDraft} maxLength={64} onChange={(event) => setNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void saveName(); } }} autoFocus />
-                <button type="button" className="icon-button" onClick={() => void saveName()} disabled={nameSaving || !nameDraft.trim()} title="保存名称" aria-label="保存名称"><Check size={16} /></button>
-                <button type="button" className="icon-button" onClick={() => { setEditingName(false); setNameDraft(node.display_name || node.hostname); setNameError(null); }} disabled={nameSaving} title="取消编辑" aria-label="取消编辑"><X size={16} /></button>
+                <button type="button" className="icon-button" onClick={() => void saveName()} disabled={nameSaving || !nameDraft.trim()} title="保存名称" aria-label="保存名称"><AppIcon name="check" size={16} /></button>
+                <button type="button" className="icon-button" onClick={() => { setEditingName(false); setNameDraft(node.display_name || node.hostname); setNameError(null); }} disabled={nameSaving} title="取消编辑" aria-label="取消编辑"><AppIcon name="close" size={16} /></button>
               </div>
             ) : (
-              <><h1>{node.display_name || node.hostname}</h1><button type="button" className="icon-button name-edit-button" onClick={() => setEditingName(true)} title="编辑服务器名称" aria-label="编辑服务器名称"><Pencil size={15} /></button></>
+              <><h1>{node.display_name || node.hostname}</h1><button type="button" className="icon-button name-edit-button" onClick={() => setEditingName(true)} title="编辑服务器名称" aria-label="编辑服务器名称"><AppIcon name="edit" size={15} /></button></>
             )}
             <span className={`status-label ${node.online ? "online" : "offline"}`}>{node.online ? "在线" : "离线"}</span>
           </div>
@@ -187,35 +171,35 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
             className="danger-button detail-delete-button"
             onClick={() => { setDeleteError(null); setDeleteConfirmationOpen(true); }}
           >
-            <Trash2 size={16} />删除节点
+            <AppIcon name="trash" size={16} />删除节点
           </button>
         </div>
       </header>
 
       <section className="current-metrics" aria-label="当前指标">
         <article>
-          <div className="metric-heading"><Cpu size={17} /><span>CPU</span></div>
+          <div className="metric-heading"><AppIcon name="cpu" size={17} /><span>CPU</span></div>
           <strong>{formatPercent(latest?.cpu_percent, 1)}</strong>
-          <MetricBar value={latest?.cpu_percent ?? 0} />
+          <MetricBar value={latest?.cpu_percent} />
           <small>{latest?.load_one != null ? `负载 ${latest.load_one.toFixed(2)} / ${latest.load_five?.toFixed(2) ?? "--"}` : "暂无负载数据"}</small>
         </article>
         <article>
-          <div className="metric-heading"><MemoryStick size={17} /><span>内存</span></div>
+          <div className="metric-heading"><AppIcon name="memory" size={17} /><span>内存</span></div>
           <strong>{formatPercent(memoryPercent, 1)}</strong>
-          <MetricBar value={memoryPercent} />
+          <MetricBar value={latest ? memoryPercent : null} />
           <small>{formatBytes(latest?.memory_used_bytes)} / {formatBytes(latest?.memory_total_bytes)}</small>
         </article>
         <article>
-          <div className="metric-heading"><HardDrive size={17} /><span>磁盘</span></div>
+          <div className="metric-heading"><AppIcon name="disk" size={17} /><span>磁盘</span></div>
           <strong>{formatPercent(diskPercent, 1)}</strong>
-          <MetricBar value={diskPercent} />
+          <MetricBar value={latest ? diskPercent : null} />
           <small>{formatBytes(latest?.disk_used_bytes)} / {formatBytes(latest?.disk_total_bytes)}</small>
         </article>
         <article>
-          <div className="metric-heading"><Network size={17} /><span>网络</span></div>
+          <div className="metric-heading"><AppIcon name="network" size={17} /><span>网络</span></div>
           <div className="network-current">
-            <strong><ArrowDown size={15} />{formatRate(latest?.network_received_bytes_per_sec)}</strong>
-            <strong><ArrowUp size={15} />{formatRate(latest?.network_transmitted_bytes_per_sec)}</strong>
+            <strong><AppIcon name="download" size={15} />{formatRate(latest?.network_received_bytes_per_sec)}</strong>
+            <strong><AppIcon name="upload" size={15} />{formatRate(latest?.network_transmitted_bytes_per_sec)}</strong>
           </div>
           <small>{latest?.interfaces.length ?? 0} 个活动接口</small>
         </article>
@@ -233,7 +217,7 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
               ))}
             </div>
             <button type="button" className="icon-button" onClick={() => void loadHistory()} title="刷新历史数据" aria-label="刷新历史数据">
-              <RefreshCw size={16} className={loading ? "spin" : ""} />
+              <AppIcon name="refresh" size={16} className={loading ? "spin" : ""} />
             </button>
           </div>
         </div>
@@ -254,9 +238,9 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
                     <XAxis dataKey="time" tickFormatter={formatChartTime} tick={{ fontSize: 11, fill: "var(--chart-text)" }} minTickGap={42} axisLine={false} tickLine={false} />
                     <YAxis domain={[0, 100]} tickFormatter={(value: number) => `${value}%`} tick={{ fontSize: 11, fill: "var(--chart-text)" }} axisLine={false} tickLine={false} />
                     <Tooltip labelFormatter={(value) => formatDateTime(String(value))} formatter={(value, name) => [`${Number(value).toFixed(1)}%`, metricName(String(name))]} contentStyle={tooltipStyle} />
-                    <Line type="monotone" dataKey="cpu" stroke="#1b7f55" strokeWidth={2} dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
-                    <Line type="monotone" dataKey="memory" stroke="#b57911" strokeWidth={2} dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
-                    <Line type="monotone" dataKey="disk" stroke="#52616b" strokeWidth={1.6} dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="cpu" stroke="var(--chart-cpu)" strokeWidth={2} dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="memory" stroke="var(--chart-memory)" strokeWidth={2} dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="disk" stroke="var(--chart-disk)" strokeWidth={1.6} dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -270,8 +254,8 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
                     <XAxis dataKey="time" tickFormatter={formatChartTime} tick={{ fontSize: 11, fill: "var(--chart-text)" }} minTickGap={42} axisLine={false} tickLine={false} />
                     <YAxis tickFormatter={(value: number) => `${value.toFixed(value < 1 ? 1 : 0)}`} tick={{ fontSize: 11, fill: "var(--chart-text)" }} axisLine={false} tickLine={false} width={44} />
                     <Tooltip labelFormatter={(value) => formatDateTime(String(value))} formatter={(value, name) => [`${Number(value).toFixed(2)} MB/s`, metricName(String(name))]} contentStyle={tooltipStyle} />
-                    <Line type="monotone" dataKey="received" stroke="#267a9b" strokeWidth={2} dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
-                    <Line type="monotone" dataKey="transmitted" stroke="#c56b3a" strokeWidth={2} dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="received" stroke="var(--chart-received)" strokeWidth={2} dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="transmitted" stroke="var(--chart-transmitted)" strokeWidth={2} dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -291,7 +275,7 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
             <div><dt>Agent</dt><dd>{node.agent_version || "--"}</dd></div>
             <div><dt>运行时间</dt><dd>{formatDuration(latest?.uptime_seconds)}</dd></div>
             <div><dt>进程数</dt><dd>{latest?.process_count ?? "--"}</dd></div>
-            <div><dt>温度</dt><dd><Thermometer size={15} />{formatTemperature(latest?.temperature_celsius)}</dd></div>
+            <div><dt>温度</dt><dd><AppIcon name="temperature" size={15} />{formatTemperature(latest?.temperature_celsius)}</dd></div>
             <div><dt>注册时间</dt><dd>{formatDateTime(node.enrolled_at)}</dd></div>
           </dl>
         </section>
@@ -306,7 +290,7 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
                 const percent = ratioPercent(disk.used_bytes, disk.total_bytes);
                 return (
                   <div className="disk-row" key={`${disk.name}-${disk.mount_point}-${index}`}>
-                    <Box size={16} />
+                    <AppIcon name="box" size={16} />
                     <div className="disk-main">
                       <div><strong>{disk.name || disk.mount_point}</strong><span>{disk.mount_point} · {disk.file_system || "--"}</span></div>
                       <MetricBar value={percent} compact />
@@ -321,7 +305,7 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
       </div>
 
       <section className="data-panel process-panel" aria-labelledby="processes-heading">
-        <div className="panel-toolbar"><div><h2 id="processes-heading">进程占用</h2><span>{latest?.processes.length ?? 0} / {latest?.process_count ?? 0} 个进程</span></div><span className="process-note"><ListTree size={14} />按 CPU、内存排序</span></div>
+        <div className="panel-toolbar"><div><h2 id="processes-heading">进程占用</h2><span>{latest?.processes.length ?? 0} / {latest?.process_count ?? 0} 个进程</span></div><span className="process-note"><AppIcon name="sort" size={14} />按 CPU、内存排序</span></div>
         {!latest?.processes.length ? (
           <div className="small-empty">等待更新后的 Agent 上报进程明细</div>
         ) : (
@@ -412,7 +396,7 @@ function DeleteConfirmation({
         <footer>
           <button ref={cancelButton} type="button" className="secondary-button" onClick={onClose} disabled={deleting}>取消</button>
           <button type="button" className="danger-button" onClick={onConfirm} disabled={deleting}>
-            <Trash2 size={16} />{deleting ? "正在删除" : "确认删除"}
+            <AppIcon name="trash" size={16} />{deleting ? "正在删除" : "确认删除"}
           </button>
         </footer>
       </section>

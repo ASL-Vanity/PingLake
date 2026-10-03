@@ -1,7 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
-  <title id="title">PingLake Signal</title>
-  <desc id="desc">A ring-shaped monitoring signal with a heartbeat waveform.</desc>
-  <rect width="256" height="256" rx="56" fill="#0f2822"/>
-  <circle cx="128" cy="128" r="74" fill="none" stroke="#21c58b" stroke-width="18"/>
-  <path d="M49 132h39l17-34 25 73 20-48 11 23h46" fill="none" stroke="#f7fffb" stroke-linecap="round" stroke-linejoin="round" stroke-width="14"/>
+  <title id="title">PingLake Node Ring Mark</title>
+  <desc id="desc">Four monitored nodes connected through the PingLake hub.</desc>
+  <rect width="256" height="256" rx="64" fill="#0B0D12"/>
+  <path d="M72 72 184 184M184 72 72 184" fill="none" stroke="#9A9CFF" stroke-width="18" stroke-linecap="round"/>
+  <circle cx="72" cy="72" r="22" fill="#9A9CFF"/>
+  <circle cx="184" cy="72" r="22" fill="#9A9CFF"/>
+  <circle cx="72" cy="184" r="22" fill="#5AD6C5"/>
+  <circle cx="184" cy="184" r="22" fill="#5AD6C5"/>
 </svg>

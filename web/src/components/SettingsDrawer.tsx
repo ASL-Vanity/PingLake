@@ -1,19 +1,16 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { LoaderCircle, Save, Settings, X } from "lucide-react";
-import type { ThemePreference } from "../App";
 import type { AlertSettings, NodeSnapshot } from "../types";
+import { AppIcon } from "./AppIcon";
 
 interface SettingsDrawerProps {
   open: boolean;
   settings: AlertSettings | null;
   nodes: NodeSnapshot[];
-  themePreference: ThemePreference;
-  onThemeChange: (theme: ThemePreference) => void;
   onClose: () => void;
   onSave: (settings: AlertSettings) => Promise<AlertSettings>;
 }
 
-export function SettingsDrawer({ open, settings, nodes, themePreference, onThemeChange, onClose, onSave }: SettingsDrawerProps) {
+export function SettingsDrawer({ open, settings, nodes, onClose, onSave }: SettingsDrawerProps) {
   const [draft, setDraft] = useState<AlertSettings | null>(settings);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -115,26 +112,13 @@ export function SettingsDrawer({ open, settings, nodes, themePreference, onTheme
       <button className="drawer-backdrop" type="button" onClick={onClose} aria-label="关闭设置" tabIndex={-1} />
       <aside ref={drawerRef} className="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-describedby="settings-description" tabIndex={-1}>
         <header className="drawer-header">
-          <div><Settings size={18} /><div><h2 id="settings-title">告警设置</h2><span id="settings-description">全局阈值与通知</span></div></div>
-          <button ref={closeButtonRef} type="button" className="icon-button" onClick={onClose} title="关闭" aria-label="关闭设置"><X size={18} /></button>
+          <div><AppIcon name="settings" size={18} /><div><h2 id="settings-title">告警设置</h2><span id="settings-description">全局阈值与通知</span></div></div>
+          <button ref={closeButtonRef} type="button" className="icon-button" onClick={onClose} title="关闭" aria-label="关闭设置"><AppIcon name="close" size={18} /></button>
         </header>
         {!draft ? (
-          <div className="drawer-loading"><LoaderCircle className="spin" size={22} />正在载入设置</div>
+          <div className="drawer-loading"><AppIcon name="loader" className="spin" size={22} />正在载入设置</div>
         ) : (
           <form className="settings-form" onSubmit={submit}>
-            <fieldset>
-              <legend>界面主题</legend>
-              <label className="field-label">
-                <span>主题</span>
-                <select value={themePreference} onChange={(event) => onThemeChange(event.target.value as ThemePreference)}>
-                  <option value="system">跟随系统</option>
-                  <option value="light">浅色</option>
-                  <option value="dark">深色</option>
-                  <option value="midnight">午夜高对比</option>
-                  <option value="circuit">科技电路</option>
-                </select>
-              </label>
-            </fieldset>
             <fieldset>
               <legend>告警项目</legend>
               <div className="metric-toggle-grid">
@@ -221,7 +205,7 @@ export function SettingsDrawer({ open, settings, nodes, themePreference, onTheme
             <footer className="drawer-footer">
               {saved && <span className="save-confirmation">设置已保存</span>}
               <button type="submit" className="primary-button" disabled={saving}>
-                {saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
+                {saving ? <AppIcon name="loader" className="spin" size={16} /> : <AppIcon name="save" size={16} />}
                 {saving ? "正在保存" : "保存设置"}
               </button>
             </footer>
