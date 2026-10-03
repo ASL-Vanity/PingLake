@@ -80,3 +80,33 @@ starting.
 No production DNS, firewall, service installation, database, or external node
 was modified by this verification run. The temporary local E2E Hub and Agents
 were stopped after testing.
+
+## Follow-up verification: 2026-10-03
+
+The clean `codex/pinglake-monitoring-production` worktree at `f531352` was
+verified again. The following checks passed:
+
+- `cargo fmt --all -- --check`
+- `cargo test --workspace --locked` — 52 Agent, 26 Hub and 10 Protocol tests
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`
+- `cargo build --workspace --release --locked`
+- `npm ci`, `npm run typecheck`, `npm test` — 23 Web tests, and `npm run build`
+- `npm audit --audit-level=high` — 0 vulnerabilities
+- `scripts/e2e-smoke.ps1 -Port 18090 -LeaveRunning` — seven registered and
+  online nodes with persisted history
+- `scripts/e2e-monitoring.ps1` — six probes, two services, process/local-port
+  checks, canonical DNS statistics, revision application, two history
+  timestamps, group deletion preservation and latency Origin/cache checks
+
+The temporary Hub and Agent processes were stopped after the run and ports
+18090/18091 were released. The built Web root returned HTTP 200 with
+`Cache-Control: no-cache`, the production CSP and the compiled entry asset also
+returned HTTP 200. This is an HTTP/API asset check only; it is not a browser
+visual or interaction result.
+
+Browser automation still cannot provide the required visual result in this
+environment. The browser client attempted to load plugin runtime version
+`26.930.31428`, while only `26.928.31416` is installed locally, so browser
+initialization failed before navigation. No browser security control was
+bypassed. Docker remains unavailable because the Docker Desktop Linux engine
+pipe is not running.
