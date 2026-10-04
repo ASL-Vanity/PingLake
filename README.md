@@ -143,7 +143,7 @@ cargo run -p pinglake-agent -- `
 
 在线备份必须使用 SQLite online backup API，或停 Hub 后复制包含已提交 WAL 内容的数据库。只复制 `.db` 而忽略 `.db-wal` 不能作为一致性备份。回滚到 v5 或更早版本需要兼容的旧数据库备份和旧二进制；不能只替换 Hub 二进制后继续使用已经迁移到 v6 的数据库。
 
-详细的升级、WAL 备份、S4 Hub 和 S1–S4 Agent 分批步骤见 [v0.3.0-upgrade.md](docs/v0.3.0-upgrade.md)。生产发布和 S4/S1–S4 更新在当前文档编写时仍为 pending，不能视为已完成。
+详细的升级、WAL 备份、S4 Hub 和 S1–S4 Agent 分批步骤及本次生产记录见 [v0.3.0-upgrade.md](docs/v0.3.0-upgrade.md)。本次 S4 Hub 与 S1–S4 Agent 已完成 Hub-first 更新；真实外部 HTTPS 测点、Windows LocalService 权限和桌面/移动端视觉验收仍需按环境人工完成。
 
 ## 常用命令
 
