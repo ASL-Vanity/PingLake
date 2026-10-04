@@ -282,9 +282,10 @@ export default function App() {
         <header className="topbar">
           <div className="topbar-mobile-brand"><button type="button" className="mobile-menu-button" onClick={() => setSidebarOpen(true)} aria-label="打开导航"><AppIcon name="menu" size={20} /></button><BrandMark size="sm" showWordmark /></div>
           <nav className="topbar-nav" aria-label="主导航">
-            {navigation.slice(0, 4).map((item) => (
+            {navigation.map((item) => (
               <button type="button" key={item.id} className={view === item.id && !selectedNode ? "active" : ""} onClick={() => navigate(item.id)}>
                 <AppIcon name={item.icon} size={16} /><span>{item.label}</span>
+                {item.id === "alerts" && monitoring.summary.active_alerts > 0 && <b>{monitoring.summary.active_alerts}</b>}
               </button>
             ))}
           </nav>
@@ -317,15 +318,15 @@ export default function App() {
           ) : view === "groups" ? (
             <GroupView groups={monitoring.groups} nodes={monitoring.nodes} onCreate={monitoring.createGroup} onDelete={monitoring.deleteGroup} onAssign={monitoring.assignNodeGroup} onOpenNode={openNodeById} onOpenHosts={(groupId) => navigate("hosts", groupId)} />
           ) : view === "hosts" ? (
-            <NodeTable nodes={monitoring.nodes} groups={monitoring.groups} browserLatency={browserLatency} query={hostQuery} onQueryChange={(query) => { setHostQuery(query); writeRoute({ view: "hosts", group: hostGroupFilter, query }); }} groupId={hostGroupFilter} onGroupChange={(group) => { setHostGroupFilter(group); writeRoute({ view: "hosts", group, query: hostQuery }); }} onSelect={(node) => openNodeById(node.id)} onCreateGroup={monitoring.createGroup} onAssignGroup={monitoring.assignNodeGroup} />
+            <NodeTable nodes={monitoring.nodes} groups={monitoring.groups} browserLatency={browserLatency} query={hostQuery} onQueryChange={(query) => { setHostQuery(query); writeRoute({ view: "hosts", group: hostGroupFilter, query }); }} groupId={hostGroupFilter} onGroupChange={(group) => { setHostGroupFilter(group); writeRoute({ view: "hosts", group, query: hostQuery }); }} onSelect={(node) => openNodeById(node.id)} onCreateGroup={monitoring.createGroup} onAssignGroup={monitoring.assignNodeGroup} onManageGroups={() => navigate("groups")} />
           ) : (
-            <><SummaryCards summary={monitoring.summary} nodes={monitoring.nodes} /><NodeTable nodes={monitoring.nodes} groups={monitoring.groups} browserLatency={browserLatency} query={hostQuery} onQueryChange={(query) => { setHostQuery(query); writeRoute({ view: "overview", query }); }} groupId={hostGroupFilter} onGroupChange={(group) => { setHostGroupFilter(group); writeRoute({ view: "overview", group, query: hostQuery }); }} onSelect={(node) => openNodeById(node.id)} onCreateGroup={monitoring.createGroup} onAssignGroup={monitoring.assignNodeGroup} /></>
+            <><SummaryCards summary={monitoring.summary} nodes={monitoring.nodes} /><NodeTable nodes={monitoring.nodes} groups={monitoring.groups} browserLatency={browserLatency} query={hostQuery} onQueryChange={(query) => { setHostQuery(query); writeRoute({ view: "overview", query }); }} groupId={hostGroupFilter} onGroupChange={(group) => { setHostGroupFilter(group); writeRoute({ view: "overview", group, query: hostQuery }); }} onSelect={(node) => openNodeById(node.id)} onCreateGroup={monitoring.createGroup} onAssignGroup={monitoring.assignNodeGroup} onManageGroups={() => navigate("groups")} /></>
           )}
         </main>
       </div>
 
       <nav className="mobile-nav" aria-label="移动端导航">
-        {navigation.slice(0, 3).map((item) => <button type="button" key={item.id} className={view === item.id && !selectedNode ? "active" : ""} onClick={() => navigate(item.id)}><AppIcon name={item.icon} size={19} /><span>{item.label}</span>{item.id === "alerts" && monitoring.summary.active_alerts > 0 && <i>{monitoring.summary.active_alerts}</i>}</button>)}
+        {navigation.filter((item) => ["overview", "hosts", "alerts"].includes(item.id)).map((item) => <button type="button" key={item.id} className={view === item.id && !selectedNode ? "active" : ""} onClick={() => navigate(item.id)}><AppIcon name={item.icon} size={19} /><span>{item.label}</span>{item.id === "alerts" && monitoring.summary.active_alerts > 0 && <i>{monitoring.summary.active_alerts}</i>}</button>)}
         <button type="button" onClick={() => setSidebarOpen(true)}><AppIcon name="menu" size={19} /><span>更多</span></button>
       </nav>
       <SettingsDrawer open={settingsOpen} settings={monitoring.settings} nodes={monitoring.nodes} onClose={() => setSettingsOpen(false)} onSave={monitoring.saveSettings} />

@@ -118,8 +118,8 @@ export function SettingsDrawer({ open, settings, nodes, onClose, onSave }: Setti
         {!draft ? (
           <div className="drawer-loading"><AppIcon name="loader" className="spin" size={22} />正在载入设置</div>
         ) : (
-          <form className="settings-form" onSubmit={submit}>
-            <fieldset>
+          <form className="settings-form" aria-busy={saving} onSubmit={submit}>
+            <fieldset disabled={saving}>
               <legend>告警项目</legend>
               <div className="metric-toggle-grid">
                 <ToggleField label="离线" detail="主机停止上报" checked={draft.offline_enabled} onChange={(checked) => { setDraft({ ...draft, offline_enabled: checked }); setSaved(false); }} />
@@ -129,7 +129,7 @@ export function SettingsDrawer({ open, settings, nodes, onClose, onSave }: Setti
                 <ToggleField label="温度" detail={temperatureAvailable ? "已检测到温度传感器" : "当前没有主机上报温度"} checked={draft.temperature_enabled} disabled={!temperatureAvailable} onChange={(checked) => { setDraft({ ...draft, temperature_enabled: checked }); setSaved(false); }} />
               </div>
             </fieldset>
-            <fieldset>
+            <fieldset disabled={saving}>
               <legend>资源阈值</legend>
               <div className="settings-grid">
                 <NumberField label="CPU" suffix="%" value={draft.cpu_percent} onChange={(value) => changeNumber("cpu_percent", value)} min={1} max={100} step={1} />
@@ -139,7 +139,7 @@ export function SettingsDrawer({ open, settings, nodes, onClose, onSave }: Setti
               </div>
             </fieldset>
 
-            <fieldset>
+            <fieldset disabled={saving}>
               <legend>触发条件</legend>
               <div className="settings-grid">
                 <NumberField label="离线判定" suffix="秒" value={draft.offline_after_seconds} onChange={(value) => changeNumber("offline_after_seconds", value)} min={5} max={86400} step={5} />
@@ -147,7 +147,7 @@ export function SettingsDrawer({ open, settings, nodes, onClose, onSave }: Setti
               </div>
             </fieldset>
 
-            <fieldset>
+            <fieldset disabled={saving}>
               <legend>Webhook</legend>
               <label className="toggle-row">
                 <span><strong>启用 Webhook</strong><small>活动与恢复事件都会发送</small></span>
@@ -177,7 +177,7 @@ export function SettingsDrawer({ open, settings, nodes, onClose, onSave }: Setti
               </label>
             </fieldset>
 
-            <fieldset>
+            <fieldset disabled={saving}>
               <legend>邮件通知</legend>
               <label className="toggle-row">
                 <span><strong>启用邮件通知</strong><small>SMTP 密码仅由 Hub 环境变量读取</small></span>

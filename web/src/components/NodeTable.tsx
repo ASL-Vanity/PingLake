@@ -12,7 +12,7 @@ import {
 import { EmptyNodes } from "./EmptyNodes";
 import { MetricBar } from "./MetricBar";
 import { AppIcon } from "./AppIcon";
-import type { BrowserLatency } from "../hooks/useBrowserLatency";
+import { browserLatencyLabel, type BrowserLatency } from "../hooks/useBrowserLatency";
 
 interface NodeTableProps {
   nodes: NodeSnapshot[];
@@ -158,7 +158,10 @@ function HostCard({ node, groups, browserLatency, onSelect, onAssignGroup }: {
           <MetricBar value={latest ? nodeMemoryPercent(node) : null} compact label="内存" />
           <MetricBar value={latest ? nodeDiskPercent(node) : null} compact label="磁盘" />
           <div className="card-network"><span><AppIcon name="download" size={13} /><b>下行</b>{formatRate(latest?.network_received_bytes_per_sec)}</span><span><AppIcon name="upload" size={13} /><b>上行</b>{formatRate(latest?.network_transmitted_bytes_per_sec)}</span></div>
-          <div className="card-latency"><span>Hub 延迟</span><strong>{formatLatency(latest?.hub_latency_ms)}</strong><small>访问 {browserLatency?.status === "ok" ? `${browserLatency.milliseconds?.toFixed(0)} ms` : browserLatency?.status === "unconfigured" ? "未配置" : "--"}</small></div>
+          <div className="card-latency">
+            <div className="latency-reading"><span>Hub 延迟</span><strong title="Agent 到 Hub 的 HTTPS 请求往返耗时">{formatLatency(latest?.hub_latency_ms)}</strong></div>
+            <div className="latency-reading"><span>浏览器访问</span><strong data-status={browserLatency?.status ?? "measuring"} title="当前浏览器直接访问该节点 HTTPS 测点的请求往返耗时；在节点监测配置中设置测点">{browserLatencyLabel(browserLatency)}</strong></div>
+          </div>
         </div>
       </button>
       <footer>
@@ -191,12 +194,16 @@ function HostListRow({ node, groups, browserLatency, onSelect, onAssignGroup }: 
         <span className="server-list-metric"><MetricBar value={latest?.cpu_percent} compact label="CPU" /></span>
         <span className="server-list-metric"><MetricBar value={latest ? nodeMemoryPercent(node) : null} compact label="内存" /></span>
         <span className="server-list-metric"><MetricBar value={latest ? nodeDiskPercent(node) : null} compact label="磁盘" /></span>
-        <span className="server-list-network"><AppIcon name="download" size={13} />{formatRate(latest?.network_received_bytes_per_sec)}<AppIcon name="upload" size={13} />{formatRate(latest?.network_transmitted_bytes_per_sec)}<small>{browserLatency?.status === "ok" ? `${browserLatency.milliseconds?.toFixed(0)} ms` : "--"}</small></span>
+        <span className="server-list-network"><AppIcon name="download" size={13} />{formatRate(latest?.network_received_bytes_per_sec)}<AppIcon name="upload" size={13} />{formatRate(latest?.network_transmitted_bytes_per_sec)}</span>
         <AppIcon name="chevron-right" size={17} className="row-chevron" />
       </button>
       <footer className="server-list-footer">
         {node.group_name && <span className="node-group-chip">{node.group_name}</span>}
         <label><span className="sr-only">{nodeName} 分组</span><select aria-label={`为 ${nodeName} 分配分组`} value={node.group_id ?? ""} onClick={(event) => event.stopPropagation()} onChange={(event) => void onAssignGroup(node.id, event.target.value || null)}><option value="">未分组</option>{groups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select></label>
+        <div className="server-list-latency">
+          <span className="latency-reading"><span>Hub 延迟</span><strong title="Agent 到 Hub 的 HTTPS 请求往返耗时">{formatLatency(latest?.hub_latency_ms)}</strong></span>
+          <span className="latency-reading"><span>浏览器访问</span><strong data-status={browserLatency?.status ?? "measuring"} title="当前浏览器直接访问该节点 HTTPS 测点的请求往返耗时；在节点监测配置中设置测点">{browserLatencyLabel(browserLatency)}</strong></span>
+        </div>
         <span title={formatDateTime(node.last_seen_at)}>{node.online ? "心跳 " : "最后心跳 "}{formatRelativeTime(node.last_seen_at)}</span>
       </footer>
     </article>

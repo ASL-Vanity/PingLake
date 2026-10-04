@@ -41,8 +41,16 @@ export function MonitoringConfig({ nodeId, config, onSaved, onUnauthorized }: { 
   return <form className="monitoring-config" onSubmit={(event) => { event.preventDefault(); void save(); }}>
     {draft.revision !== config.revision && <div className="monitoring-reload" role="status"><span>配置已更新为版本 {config.revision}，当前编辑版本为 {draft.revision}。</span><button type="button" className="secondary-button" disabled={saving} onClick={() => { setDraft(config); setError(null); setSaved(false); }}><RefreshCw size={15} />载入最新配置</button></div>}
     <fieldset disabled={saving}>
-      <legend>访问延迟测点</legend>
-      <label>HTTPS URL<input type="url" value={draft.browser_latency_url ?? ""} placeholder="https://node.example.com/pinglake/latency" onChange={(event) => change({ browser_latency_url: event.target.value || null })} /></label>
+      <legend>浏览器访问延迟</legend>
+      <p className="monitoring-help" id="browser-latency-description">从当前打开控制台的浏览器直接请求受监主机的 HTTPS 测点，展示完整请求的往返耗时。每位访问者的结果只在自己的浏览器中测量。</p>
+      <label>节点 HTTPS 测点 URL<input type="url" aria-describedby="browser-latency-description" value={draft.browser_latency_url ?? ""} placeholder="https://node.example.com/pinglake/latency" onChange={(event) => change({ browser_latency_url: event.target.value || null })} /></label>
+      <details className="browser-latency-help">
+        <summary>如何启用浏览器访问延迟</summary>
+        <p>在受监主机上启用 Agent 的延迟端点，并用 HTTPS 反向代理开放 <code>/pinglake/latency</code>。地址必须由当前浏览器直接访问，不能填写 Hub 的地址。</p>
+        <pre><code>{`latency_bind = "127.0.0.1:18091"\ndashboard_origin = "${window.location.origin}"`}</code></pre>
+        <p>测点应返回成功响应，允许控制台来源 <code>{window.location.origin}</code> 的 CORS 请求，并保留 <code>Cache-Control: no-store</code>。请关闭该路径的 CDN 缓存。测点地址首次保存或切换到新的来源后，刷新控制台以更新安全策略。</p>
+        <p>未配置、节点离线或访问受限会显示对应状态；浏览器测量使用 HTTPS 请求，无法直接执行 ICMP ping。</p>
+      </details>
     </fieldset>
     <fieldset disabled={saving}>
       <legend>指定服务</legend>

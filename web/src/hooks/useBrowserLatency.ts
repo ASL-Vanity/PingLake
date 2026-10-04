@@ -73,6 +73,6 @@ export function useBrowserLatency(nodes: NodeSnapshot[]) {
 
 export function browserLatencyLabel(value?: BrowserLatency): string {
   if (!value) return "测量中";
-  if (value.status === "ok") return `${value.milliseconds?.toFixed(0)} ms`;
+  if (value.status === "ok") return typeof value.milliseconds === "number" && Number.isFinite(value.milliseconds) && value.milliseconds >= 0 ? `${value.milliseconds.toFixed(0)} ms` : "暂无测量";
   return ({ unconfigured: "未配置", measuring: "测量中", unreachable: "不可达 / 访问受限", offline: "节点离线", paused: "已暂停", reload_required: "需刷新页面", invalid: "测点地址无效" })[value.status];
 }

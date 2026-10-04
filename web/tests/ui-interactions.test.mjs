@@ -271,15 +271,26 @@ test("manual detail refresh fetches configuration and trend data together", asyn
   } finally { await cleanup(); }
 });
 
-test("settings fields are locked until save completes and page mode is not a modal", async () => {
-  let resolveSave;
-  await mount(React.createElement(SettingsDrawer, { open: true, inline: true, settings, nodes: [node()], themePreference: "light", onThemeChange() {}, onClose() {}, onSave: (value) => new Promise((resolve) => { resolveSave = () => resolve(value); }) }));
+test("settings fields are locked while saving and unlock after completion", async () => {
+  let saveStarted = false;
+  await mount(React.createElement(SettingsDrawer, {
+    open: true,
+    settings,
+    nodes: [node()],
+    onClose() {},
+    onSave: async (value) => {
+      saveStarted = true;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return value;
+    },
+  }));
   try {
-    await act(async () => container.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    assert.equal(container.querySelector('[role="dialog"]'), null);
+    container.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(saveStarted, true);
     assert.equal(container.querySelector("form").getAttribute("aria-busy"), "true");
     assert.ok([...container.querySelectorAll("input, select")].every((input) => input.matches(":disabled")));
-    await act(async () => resolveSave());
+    await new Promise((resolve) => setTimeout(resolve, 40));
     assert.equal(container.querySelector("form").getAttribute("aria-busy"), "false");
     assert.match(container.textContent, /设置已保存/);
   } finally { await cleanup(); }

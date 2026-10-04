@@ -30,7 +30,7 @@ import { MetricBar } from "./MetricBar";
 import { AppIcon } from "./AppIcon";
 import { HistoryRangeControl, HistoryRangeProvider } from "./HistoryRange";
 import { MonitoringPanel, type DetailTab } from "./MonitoringPanel";
-import type { BrowserLatency } from "../hooks/useBrowserLatency";
+import { browserLatencyLabel, type BrowserLatency } from "../hooks/useBrowserLatency";
 
 interface NodeDetailProps {
   node: NodeSnapshot;
@@ -181,7 +181,11 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized, b
           </div>
           <div className="detail-heartbeat latency-heartbeat">
             <span>Hub 延迟</span>
-            <strong title="节点到新加坡 PingLake Hub 的 HTTPS 往返耗时">{formatLatency(hubLatency)}</strong>
+            <strong title="Agent 到 Hub 的 HTTPS 请求往返耗时">{formatLatency(hubLatency)}</strong>
+          </div>
+          <div className="detail-heartbeat latency-heartbeat browser-latency-heartbeat">
+            <span>浏览器访问</span>
+            <strong data-status={browserLatency?.status ?? "measuring"} title="当前浏览器直接访问该节点 HTTPS 测点的请求往返耗时；在监测配置页签中设置测点">{browserLatencyLabel(browserLatency)}</strong>
           </div>
           <button
             type="button"
