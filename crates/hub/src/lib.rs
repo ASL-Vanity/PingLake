@@ -1,6 +1,7 @@
 mod config;
 mod db;
 mod error;
+mod monitoring;
 mod static_files;
 
 use std::{
@@ -33,7 +34,8 @@ use lettre::{
 };
 use pinglake_protocol::{
     AlertRecord, AlertSettings, DEFAULT_REPORT_INTERVAL_SECS, DashboardSummary, EnrollRequest,
-    EnrollResponse, HistoryPoint, LiveEvent, MetricReport, NodeSnapshot,
+    EnrollResponse, HistoryPoint, LiveEvent, MetricReport, MonitoringHistoryPoint,
+    NodeMonitoringConfig, NodeSnapshot, ProbeStatistics,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -91,6 +93,19 @@ struct HistoryQuery {
 }
 
 #[derive(Deserialize)]
+struct MonitoringHistoryQuery {
+    #[serde(default = "default_history_minutes")]
+    minutes: u64,
+    #[serde(default = "default_monitoring_section")]
+    section: String,
+    device: Option<String>,
+}
+
+fn default_monitoring_section() -> String {
+    "all".to_owned()
+}
+
+#[derive(Deserialize)]
 struct GroupRequest {
     name: String,
 }
@@ -126,6 +141,7 @@ pub fn build_app(config: Config) -> anyhow::Result<(Router, AppState)> {
     let agent = Router::new()
         .route("/api/v1/agent/enroll", post(enroll))
         .route("/api/v1/agent/metrics", post(metrics))
+        .route("/api/v1/agent/config", get(agent_monitoring_config))
         .layer(DefaultBodyLimit::max(AGENT_BODY_LIMIT_BYTES));
 
     let protected = Router::new()
@@ -137,6 +153,24 @@ pub fn build_app(config: Config) -> anyhow::Result<(Router, AppState)> {
         .route("/api/v1/nodes/{id}/group", put(assign_node_group))
         .route("/api/v1/nodes/{id}/name", put(rename_node))
         .route("/api/v1/nodes/{id}/history", get(history))
+        .route(
+            "/api/v1/nodes/{id}/monitoring",
+            get(get_monitoring_config)
+                .put(put_monitoring_config)
+                .layer(DefaultBodyLimit::max(32 * 1024)),
+        )
+        .route(
+            "/api/v1/nodes/{id}/monitoring/history",
+            get(monitoring_history),
+        )
+        .route(
+            "/api/v1/nodes/{id}/probes/statistics",
+            get(probe_statistics),
+        )
+        .route(
+            "/api/v1/nodes/{id}/checks/statistics",
+            get(check_statistics),
+        )
         .route("/api/v1/groups", get(groups).post(create_group))
         .route("/api/v1/groups/{id}", delete(delete_group))
         .route("/api/v1/alerts", get(alerts))
@@ -155,7 +189,10 @@ pub fn build_app(config: Config) -> anyhow::Result<(Router, AppState)> {
         .merge(agent)
         .merge(protected)
         .fallback(static_files::serve)
-        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            security_headers,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 
@@ -324,6 +361,7 @@ async fn enroll(
         EnrollResult::Created | EnrollResult::Updated => Ok(Json(EnrollResponse {
             accepted: true,
             report_interval_secs: DEFAULT_REPORT_INTERVAL_SECS,
+            monitoring_schema_max: 2,
         })),
         EnrollResult::SecretMismatch => Err(AppError::conflict("agent ID is already registered")),
         EnrollResult::EnrollmentTokenRequired => Err(AppError::unauthorized()),
@@ -335,7 +373,10 @@ async fn metrics(
     headers: HeaderMap,
     Json(report): Json<MetricReport>,
 ) -> Result<StatusCode, AppError> {
-    validate_metric_report(&report)?;
+    if let Err(error) = validate_metric_report(&report) {
+        tracing::warn!(error = %error, "metric report validation rejected an agent report");
+        return Err(error);
+    }
     let node_id = headers
         .get("x-agent-id")
         .and_then(|value| value.to_str().ok())
@@ -343,6 +384,25 @@ async fn metrics(
         .ok_or_else(AppError::unauthorized)?;
     let secret = bearer_secret(&headers).ok_or_else(AppError::unauthorized)?;
     let secret_hash = hash_hex(secret.as_bytes());
+    if state
+        .inner
+        .database
+        .agent_monitoring_config(node_id, &secret_hash)?
+        .is_none()
+    {
+        return Err(AppError::unauthorized());
+    }
+    if let Some(data) = &report.monitoring
+        && !state
+            .inner
+            .database
+            .validate_monitoring_identity(node_id, data)?
+    {
+        tracing::warn!(node_id = %node_id, "metric report monitoring identity rejected");
+        return Err(AppError::bad_request(
+            "service or probe result does not match this node's monitoring configuration",
+        ));
+    }
     let result = state
         .inner
         .database
@@ -414,6 +474,7 @@ async fn create_group(
         return Err(AppError::conflict("group name already exists"));
     }
     let group = state.inner.database.create_group(name)?;
+    state.publish(LiveEvent::GroupsChanged(state.inner.database.groups()?));
     Ok((StatusCode::CREATED, Json(group)))
 }
 
@@ -423,6 +484,10 @@ async fn delete_group(
 ) -> Result<StatusCode, AppError> {
     if !state.inner.database.delete_group(group_id)? {
         return Err(AppError::not_found("group not found"));
+    }
+    state.publish(LiveEvent::GroupsChanged(state.inner.database.groups()?));
+    for snapshot in state.inner.database.nodes()? {
+        state.publish(LiveEvent::Snapshot(Box::new(snapshot)));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -475,6 +540,197 @@ async fn history(
         .history(node_id, query.minutes)?
         .map(Json)
         .ok_or_else(|| AppError::not_found("node not found"))
+}
+
+async fn get_monitoring_config(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<NodeMonitoringConfig>, AppError> {
+    state
+        .inner
+        .database
+        .monitoring_config(id)?
+        .map(Json)
+        .ok_or_else(|| AppError::not_found("node not found"))
+}
+
+async fn put_monitoring_config(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(config): Json<NodeMonitoringConfig>,
+) -> Result<Json<NodeMonitoringConfig>, AppError> {
+    monitoring::validate_config(&config)?;
+    let config = state
+        .inner
+        .database
+        .save_monitoring_config(id, config)
+        .map_err(|error| {
+            if error.is::<monitoring::MonitoringRevisionConflict>() {
+                AppError::conflict(error.to_string())
+            } else {
+                AppError::Internal(error)
+            }
+        })?
+        .ok_or_else(|| AppError::not_found("node not found"))?;
+    if let Some(snapshot) = state
+        .inner
+        .database
+        .nodes()?
+        .into_iter()
+        .find(|node| node.id == id)
+    {
+        state.publish(LiveEvent::Snapshot(Box::new(snapshot)));
+    }
+    Ok(Json(config))
+}
+
+async fn agent_monitoring_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<NodeMonitoringConfig>, AppError> {
+    let id = headers
+        .get("x-agent-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(AppError::unauthorized)?;
+    let secret = bearer_secret(&headers).ok_or_else(AppError::unauthorized)?;
+    let schema_max = headers
+        .get("x-monitoring-schema-max")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1);
+    let config = state
+        .inner
+        .database
+        .agent_monitoring_config(id, &hash_hex(secret.as_bytes()))?
+        .ok_or_else(AppError::unauthorized)?;
+    if schema_max < 2 {
+        let mut legacy = config;
+        legacy.process_checks.clear();
+        legacy.local_port_checks.clear();
+        legacy.probes.retain(|probe| {
+            matches!(
+                probe.kind,
+                pinglake_protocol::ProbeKind::Icmp
+                    | pinglake_protocol::ProbeKind::Tcp
+                    | pinglake_protocol::ProbeKind::Http
+            )
+        });
+        return Ok(Json(legacy));
+    }
+    Ok(Json(config))
+}
+
+fn validate_history_minutes(minutes: u64) -> Result<(), AppError> {
+    if minutes == 0 || minutes > MAX_HISTORY_MINUTES {
+        Err(AppError::bad_request(format!(
+            "minutes must be between 1 and {MAX_HISTORY_MINUTES}"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+async fn monitoring_history(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<MonitoringHistoryQuery>,
+) -> Result<Json<Vec<MonitoringHistoryPoint>>, AppError> {
+    validate_history_minutes(query.minutes)?;
+    if ![
+        "cpu",
+        "memory",
+        "disk",
+        "network",
+        "tcp",
+        "agent",
+        "services",
+        "probes",
+        "dns",
+        "processes",
+        "ports",
+        "all",
+    ]
+    .contains(&query.section.as_str())
+        || query
+            .device
+            .as_ref()
+            .is_some_and(|device| device.len() > 512)
+    {
+        return Err(AppError::bad_request(
+            "invalid monitoring history section or device",
+        ));
+    }
+    let points = tokio::task::spawn_blocking(move || {
+        state.inner.database.monitoring_history(
+            id,
+            query.minutes,
+            &query.section,
+            query.device.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| AppError::Internal(error.into()))??
+    .ok_or_else(|| AppError::not_found("node not found"))?;
+    if serde_json::to_vec(&points)
+        .map_err(|error| AppError::Internal(error.into()))?
+        .len()
+        > monitoring::MAX_HISTORY_BYTES
+    {
+        return Err(AppError::bad_request(
+            "history exceeds 4 MiB; select a section or device, or a shorter window",
+        ));
+    }
+    Ok(Json(points))
+}
+
+async fn probe_statistics(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<Vec<ProbeStatistics>>, AppError> {
+    validate_history_minutes(query.minutes)?;
+    tokio::task::spawn_blocking(move || state.inner.database.probe_statistics(id, query.minutes))
+        .await
+        .map_err(|error| AppError::Internal(error.into()))??
+        .map(Json)
+        .ok_or_else(|| AppError::not_found("node not found"))
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckStatisticsQuery {
+    #[serde(default = "default_history_minutes")]
+    minutes: u64,
+    kind: Option<String>,
+}
+
+async fn check_statistics(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<CheckStatisticsQuery>,
+) -> Result<Json<Vec<monitoring::CheckStatistics>>, AppError> {
+    validate_history_minutes(query.minutes)?;
+    if query
+        .kind
+        .as_deref()
+        .is_some_and(|kind| !matches!(kind, "dns" | "process" | "port"))
+    {
+        return Err(AppError::bad_request("invalid check statistics kind"));
+    }
+    tokio::task::spawn_blocking(move || {
+        state.inner.database.check_statistics(
+            id,
+            query.minutes,
+            query
+                .kind
+                .as_deref()
+                .map(|kind| if kind == "dns" { "probe" } else { kind }),
+        )
+    })
+    .await
+    .map_err(|error| AppError::Internal(error.into()))??
+    .map(Json)
+    .ok_or_else(|| AppError::not_found("node not found"))
 }
 
 async fn delete_node(
@@ -548,27 +804,32 @@ async fn require_admin(
     Ok(next.run(request).await)
 }
 
-async fn security_headers(request: Request, next: Next) -> Response {
+async fn security_headers(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
+    let origins = state
+        .inner
+        .database
+        .browser_latency_origins()
+        .unwrap_or_default();
+    let connect_sources = origins.join(" ");
+    let csp = format!(
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' {connect_sources}; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+    );
     let headers = response.headers_mut();
     for (name, value) in [
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
         ("referrer-policy", "same-origin"),
         ("cross-origin-opener-policy", "same-origin"),
-        (
-            "content-security-policy",
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
-        ),
+        ("content-security-policy", csp.as_str()),
         (
             "permissions-policy",
             "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
         ),
     ] {
-        headers.insert(
-            HeaderName::from_static(name),
-            HeaderValue::from_static(value),
-        );
+        if let Ok(value) = HeaderValue::from_str(value) {
+            headers.insert(HeaderName::from_static(name), value);
+        }
     }
     response
 }
@@ -690,6 +951,9 @@ fn validate_metric_report(report: &MetricReport) -> Result<(), AppError> {
         }
         validate_sqlite_integer("process.memory_bytes", process.memory_bytes)?;
     }
+    if let Some(data) = &report.monitoring {
+        monitoring::validate_data(data)?;
+    }
     Ok(())
 }
 
@@ -807,6 +1071,7 @@ fn notification_enabled_for_kind(
         pinglake_protocol::AlertKind::Memory => settings.memory_enabled,
         pinglake_protocol::AlertKind::Disk => settings.disk_enabled,
         pinglake_protocol::AlertKind::Temperature => settings.temperature_enabled,
+        pinglake_protocol::AlertKind::Service | pinglake_protocol::AlertKind::Probe => true,
     }
 }
 

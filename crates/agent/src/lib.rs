@@ -1,19 +1,26 @@
 mod client;
 mod config;
+mod latency_endpoint;
 mod metrics;
+mod monitoring_runtime;
+mod probes;
+mod services;
+mod spool;
 mod state;
 
 #[cfg(target_os = "windows")]
 pub mod windows_service;
 
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Instant;
+use std::{path::PathBuf, time::Duration};
 
 #[cfg(target_os = "windows")]
 use std::fs::{self, File, OpenOptions};
 #[cfg(target_os = "windows")]
 use std::io::{self, Write};
 #[cfg(target_os = "windows")]
-use std::path::{Path, PathBuf};
+use std::path::Path;
 #[cfg(target_os = "windows")]
 use std::sync::Mutex;
 
@@ -23,7 +30,9 @@ use metrics::MetricCollector;
 use pinglake_protocol::{DEFAULT_REPORT_INTERVAL_SECS, EnrollRequest, EnrollResponse};
 use state::{AgentState, StateStore};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+#[cfg(test)]
+use tracing::error;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::client::{ApiClient, SendError};
@@ -59,10 +68,18 @@ struct PreparedAgent {
     collector: MetricCollector,
     enroll_request: EnrollRequest,
     configured_interval_secs: Option<u64>,
+    queue_path: PathBuf,
+    probe_policy: probes::ProbePolicy,
+    latency_endpoint: Option<(std::net::SocketAddr, String)>,
 }
 
 impl PreparedAgent {
     fn new(settings: Settings, state_store: StateStore) -> Result<Self> {
+        let probe_policy = probes::ProbePolicy {
+            allow_private: settings.allow_private_probe_targets,
+            allow_loopback: settings.allow_loopback_probe_targets,
+        };
+        let latency_endpoint = settings.latency_bind.zip(settings.dashboard_origin.clone());
         if settings.insecure_skip_verify {
             warn!(
                 "SECURITY WARNING: TLS certificate verification is disabled; use only for temporary diagnostics"
@@ -81,6 +98,7 @@ impl PreparedAgent {
             )
         }
         let state = loaded_state.state;
+        let queue_path = state_store.directory().join("agent-spool.sqlite");
         let client = ApiClient::new(settings.hub_url, settings.insecure_skip_verify)?;
 
         let collector = MetricCollector::new();
@@ -104,6 +122,9 @@ impl PreparedAgent {
             collector,
             enroll_request,
             configured_interval_secs: settings.interval_secs,
+            queue_path,
+            probe_policy,
+            latency_endpoint,
         })
     }
 
@@ -149,12 +170,16 @@ impl PreparedAgent {
             "agent enrolled; metric reporting started"
         );
 
-        report_loop(
-            &self.client,
-            &self.state,
-            &mut self.collector,
+        monitoring_runtime::run(
+            self.client,
+            self.state,
+            self.collector,
             interval_secs,
-            &shutdown,
+            enroll_response.monitoring_schema_max,
+            self.queue_path,
+            self.probe_policy,
+            self.latency_endpoint,
+            shutdown,
         )
         .await
     }
@@ -202,45 +227,14 @@ async fn enroll_with_backoff(
     }
 }
 
-async fn report_loop(
-    client: &ApiClient,
-    state: &AgentState,
-    collector: &mut MetricCollector,
-    interval_secs: u64,
-    shutdown: &CancellationToken,
-) -> Result<()> {
-    let interval = Duration::from_secs(interval_secs);
-    let mut next_report = tokio::time::Instant::now();
-
-    loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => {
-                info!("shutdown requested; stopping agent");
-                return Ok(());
-            }
-            _ = tokio::time::sleep_until(next_report) => {}
-        }
-
-        let report = collector.collect();
-        match send_with_backoff(client, state, &report, shutdown).await? {
-            SendResult::Sent(latency) => {
-                collector.record_hub_latency(latency);
-                next_report = tokio::time::Instant::now() + interval;
-            }
-            SendResult::Shutdown => {
-                info!("shutdown requested; stopping agent");
-                return Ok(());
-            }
-        }
-    }
-}
-
+#[cfg(test)]
 #[derive(Debug, Eq, PartialEq)]
 enum SendResult {
     Sent(Duration),
     Shutdown,
 }
 
+#[cfg(test)]
 async fn send_with_backoff(
     client: &ApiClient,
     state: &AgentState,

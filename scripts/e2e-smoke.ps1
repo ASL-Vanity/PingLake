@@ -6,6 +6,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Restore-Environment {
+    param([hashtable]$Values)
+    foreach ($name in $Values.Keys) {
+        if ($null -eq $Values[$name]) {
+            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        } else {
+            [Environment]::SetEnvironmentVariable($name, $Values[$name], 'Process')
+        }
+    }
+}
+
 function New-Secret {
     $bytes = New-Object byte[] 32
     $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -96,6 +107,11 @@ $adminPassword = New-Secret
 $enrollmentToken = New-Secret
 $hubProcess = $null
 $agentProcesses = @()
+$keepProcesses = $false
+
+if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+    throw "Port $Port is already in use; specify a free test port."
+}
 
 if (-not (Test-Path -LiteralPath $hubBinary -PathType Leaf)) {
     throw "Hub binary is missing: $hubBinary"
@@ -129,9 +145,7 @@ try {
         -RedirectStandardError (Join-Path $runRoot 'hub.err.log')
     Wait-ForHub -BaseUrl $baseUrl
 
-    foreach ($name in $savedEnvironment.Keys) {
-        [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
-    }
+    Restore-Environment -Values $savedEnvironment
 
     for ($index = 1; $index -le 7; $index++) {
         $stateDirectory = Join-Path $runRoot "agent-state-$index"
@@ -190,6 +204,7 @@ try {
     }
 
     if ($LeaveRunning) {
+        $keepProcesses = $true
         [pscustomobject]@{
             status = 'running'
             base_url = $baseUrl
@@ -241,10 +256,8 @@ try {
         login_authenticated = $login.authenticated
     } | ConvertTo-Json -Compress
 } finally {
-    foreach ($name in $savedEnvironment.Keys) {
-        [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
-    }
-    if (-not $LeaveRunning) {
+    Restore-Environment -Values $savedEnvironment
+    if (-not $keepProcesses) {
         foreach ($agentProcess in $agentProcesses) {
             Stop-IfRunning -Id $agentProcess.Id
         }

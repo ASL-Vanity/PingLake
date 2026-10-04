@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::time::{Duration, Instant};
 use sysinfo::{Components, Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
+#[path = "collectors/mod.rs"]
+mod collectors;
 const MAX_DETAIL_ITEMS: usize = 128;
 const MAX_PROCESS_ITEMS: usize = 25;
 
@@ -25,6 +27,7 @@ pub struct MetricCollector {
     previous_network_totals: HashMap<String, NetworkTotals>,
     previous_network_time: Option<Instant>,
     last_hub_latency_ms: Option<f32>,
+    detailed: collectors::DetailedCollector,
 }
 
 impl MetricCollector {
@@ -39,6 +42,7 @@ impl MetricCollector {
             previous_network_totals: HashMap::new(),
             previous_network_time: None,
             last_hub_latency_ms: None,
+            detailed: collectors::DetailedCollector::new(),
         }
     }
 
@@ -63,6 +67,7 @@ impl MetricCollector {
 
     pub fn collect(&mut self) -> MetricReport {
         self.system.refresh_memory();
+        self.system.refresh_cpu_frequency();
         // `refresh_all` refreshes CPU before walking processes. On large Linux hosts, the walk
         // can cross sysinfo's refresh interval and trigger a second CPU refresh, producing a
         // tiny denominator for process CPU deltas. Refreshing processes owns the CPU update here.
@@ -84,6 +89,7 @@ impl MetricCollector {
         interfaces.truncate(MAX_DETAIL_ITEMS);
         let load = load_average();
         let processes = self.collect_processes();
+        let monitoring = self.detailed.collect(&self.system, &disks);
 
         MetricReport {
             collected_at: Utc::now(),
@@ -106,6 +112,7 @@ impl MetricCollector {
             processes,
             disks,
             interfaces,
+            monitoring: Some(monitoring),
         }
     }
 
@@ -280,7 +287,7 @@ fn detailed_os_version() -> String {
 fn detailed_os_version() -> String {
     let raw_product = System::long_os_version().unwrap_or_else(|| "Windows".to_owned());
     let product = raw_product
-        .split(|character| matches!(character, '\u{00b7}' | '\u{00c2}'))
+        .split(['\u{00b7}', '\u{00c2}'])
         .next()
         .unwrap_or("Windows")
         .trim()
@@ -290,8 +297,7 @@ fn detailed_os_version() -> String {
         .and_then(|version| {
             version
                 .split(|character: char| !character.is_ascii_digit())
-                .filter(|component| component.len() >= 3)
-                .next_back()
+                .rfind(|component| component.len() >= 3)
                 .map(str::to_owned)
         });
 

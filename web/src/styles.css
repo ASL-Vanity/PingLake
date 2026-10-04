@@ -26,6 +26,10 @@
   --blue: #71b9ff;
   --shadow: 0 18px 50px rgba(0, 0, 0, 0.2), 0 2px 8px rgba(0, 0, 0, 0.12);
   --shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.12);
+  /* Shared aliases used by the monitoring extension components. */
+  --surface-subtle: var(--surface-soft);
+  --surface-muted: var(--surface-hover);
+  --item-shadow: var(--shadow-soft);
   --chart-cpu: #8b8eff;
   --chart-memory: #f2bd63;
   --chart-disk: #9ba6bb;

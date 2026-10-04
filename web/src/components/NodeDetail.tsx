@@ -28,6 +28,9 @@ import {
 } from "../utils";
 import { MetricBar } from "./MetricBar";
 import { AppIcon } from "./AppIcon";
+import { HistoryRangeControl, HistoryRangeProvider } from "./HistoryRange";
+import { MonitoringPanel, type DetailTab } from "./MonitoringPanel";
+import type { BrowserLatency } from "../hooks/useBrowserLatency";
 
 interface NodeDetailProps {
   node: NodeSnapshot;
@@ -35,12 +38,18 @@ interface NodeDetailProps {
   onDelete: (nodeId: string) => Promise<void>;
   onRename: (nodeId: string, displayName: string) => Promise<NodeSnapshot>;
   onUnauthorized: () => void;
+  browserLatency?: BrowserLatency;
+  onConfigSaved: () => void;
+  initialTab?: DetailTab;
+  onTabChange?: (tab: DetailTab) => void;
+  refreshKey?: number;
 }
 
 type HistoryRange = 60 | 360 | 1440;
 
-export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }: NodeDetailProps) {
+export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized, browserLatency, onConfigSaved, initialTab = "overview", onTabChange, refreshKey = 0 }: NodeDetailProps) {
   const [range, setRange] = useState<HistoryRange>(60);
+  const [detailTab, setDetailTab] = useState<DetailTab>(initialTab);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +62,13 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
   const [nameError, setNameError] = useState<string | null>(null);
   const historyRequestId = useRef(0);
   const historyRequestAbort = useRef<AbortController | null>(null);
+
+  useEffect(() => setDetailTab(initialTab), [initialTab]);
+
+  const changeDetailTab = (tab: DetailTab) => {
+    setDetailTab(tab);
+    onTabChange?.(tab);
+  };
 
   const loadHistory = useCallback(async (quiet = false) => {
     const requestId = ++historyRequestId.current;
@@ -78,7 +94,7 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
         setLoading(false);
       }
     }
-  }, [node.id, onUnauthorized, range]);
+  }, [node.id, onUnauthorized, range, refreshKey]);
 
   useEffect(() => {
     void loadHistory();
@@ -136,6 +152,7 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
   const hubLatency = latest?.hub_latency_ms;
 
   return (
+    <HistoryRangeProvider minutes={range} setMinutes={setRange} refreshKey={refreshKey}>
     <div className="detail-view">
       <header className="detail-header">
         <button type="button" className="icon-button" onClick={onBack} aria-label="返回节点列表" title="返回节点列表">
@@ -205,17 +222,19 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
         </article>
       </section>
 
+      <MonitoringPanel
+        node={node}
+        tab={detailTab}
+        onTabChange={changeDetailTab}
+        onUnauthorized={onUnauthorized}
+        onConfigSaved={onConfigSaved}
+        browserLatency={browserLatency}
+        toolbar={detailTab !== "config" ? <HistoryRangeControl minutes={range} onChange={setRange} /> : null}
+        overview={<>
       <section className="data-panel history-panel" aria-labelledby="history-heading">
         <div className="panel-toolbar">
           <div><h2 id="history-heading">历史趋势</h2><span>{history.length} 个采样点</span></div>
           <div className="chart-actions">
-            <div className="segmented-control" aria-label="历史范围">
-              {([60, 360, 1440] as const).map((minutes) => (
-                <button type="button" className={range === minutes ? "active" : ""} onClick={() => setRange(minutes)} key={minutes}>
-                  {minutes === 60 ? "1 小时" : minutes === 360 ? "6 小时" : "24 小时"}
-                </button>
-              ))}
-            </div>
             <button type="button" className="icon-button" onClick={() => void loadHistory()} title="刷新历史数据" aria-label="刷新历史数据">
               <AppIcon name="refresh" size={16} className={loading ? "spin" : ""} />
             </button>
@@ -317,6 +336,8 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
           </div>
         )}
       </section>
+        </>}
+      />
 
       {deleteConfirmationOpen && (
         <DeleteConfirmation
@@ -328,6 +349,7 @@ export function NodeDetail({ node, onBack, onDelete, onRename, onUnauthorized }:
         />
       )}
     </div>
+    </HistoryRangeProvider>
   );
 }
 
